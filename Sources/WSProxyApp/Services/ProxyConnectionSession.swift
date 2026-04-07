@@ -107,7 +107,7 @@ final class ProxyConnectionSession: @unchecked Sendable {
         guard receiveBufferCount() >= MTProtoHandshakeParser.handshakeLength else { return }
 
         let handshakeData = takeHandshakeBytes()
-        guard let handshake = MTProtoHandshakeParser.parse(Data(handshakeData)) else {
+        guard let handshake = MTProtoHandshakeParser.parse(Data(handshakeData), secretHex: settings.secret) else {
             logger.append(.warning, "Received non-MTProto handshake payload")
             return
         }
