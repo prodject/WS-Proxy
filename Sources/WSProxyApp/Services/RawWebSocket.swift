@@ -45,7 +45,7 @@ final class RawWebSocket {
         \r
         """
 
-        try await send(connection: connection, data: Data(request.utf8))
+        try await Self.sendData(connection: connection, data: Data(request.utf8))
         let response = try await readHTTPResponse(from: connection, timeout: timeout)
         let status = parseStatusCode(response)
         guard status == 101 else {
@@ -119,7 +119,7 @@ final class RawWebSocket {
         let maskKey = masked ? try await reader.readExactly(4) : Data()
         let payload = payloadLength > 0 ? try await reader.readExactly(payloadLength) : Data()
         if masked {
-            return (opcode, xor(payload, maskKey))
+            return (opcode, Self.xor(payload, maskKey))
         }
         return (opcode, payload)
     }

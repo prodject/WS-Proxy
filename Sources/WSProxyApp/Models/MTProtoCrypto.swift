@@ -140,7 +140,7 @@ struct MTProtoBridgeContext {
         clientEncryptor = try MTProtoStreamCipher(key: clientEncKey, iv: clientEncIV)
         relayEncryptor = try MTProtoStreamCipher(key: relayEncKey, iv: relayEncIV)
         relayDecryptor = try MTProtoStreamCipher(key: relayDecKey, iv: relayDecIV)
-        packetSplitter = MTProtoPacketSplitter(
+        packetSplitter = try MTProtoPacketSplitter(
             inspectorCipher: MTProtoStreamCipher(key: relayEncKey, iv: relayEncIV),
             transport: handshake.transport
         )

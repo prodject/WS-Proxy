@@ -8,7 +8,7 @@ final class MTProtoPacketSplitter {
     private var isDisabled = false
     private let lock = NSLock()
 
-    init(inspectorCipher: MTProtoStreamCipher, transport: MTProtoTransport) {
+    init(inspectorCipher: MTProtoStreamCipher, transport: MTProtoTransport) throws {
         self.inspectorCipher = inspectorCipher
         self.transport = transport
         do {
