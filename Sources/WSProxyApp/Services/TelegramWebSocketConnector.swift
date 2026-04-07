@@ -41,7 +41,7 @@ final class TelegramWebSocketConnector {
             logger.append(.debug, "Skipping direct WS for \(routeKey) due to blacklist")
         }
 
-        return try await connectRelayCandidates(
+        return try await raceRelayCandidates(
             handshake: handshake,
             settings: settings,
             logger: logger,
@@ -112,7 +112,7 @@ final class TelegramWebSocketConnector {
         return ["kws\(dcID).web.telegram.org", "kws\(dcID)-1.web.telegram.org"]
     }
 
-    private func connectRelayCandidates(
+    private func raceRelayCandidates(
         handshake: MTProtoHandshake,
         settings: ProxySettings,
         logger: ProxyLogStore,
@@ -129,69 +129,109 @@ final class TelegramWebSocketConnector {
             degradedTimeout: directWebSocketRetryTimeout
         )
 
-        if let targetIP, !directWSBlacklisted {
-            do {
-                if let socket = try await connectDirectWebSocket(
-                    targetIP: targetIP,
-                    domains: domains,
-                    timeout: directTimeout,
-                    logger: logger
-                ) {
-                    await routeState.clearDirectWSFailure(for: routeKey)
-                    return .webSocket(socket)
-                }
-            } catch DirectWebSocketConnectError.redirectOnly {
-                await routeState.blacklistDirectWS(for: routeKey)
-            } catch {
-                await routeState.markDirectWSFailure(for: routeKey, duration: directWSCooldown)
-            }
+        enum RelayAttempt {
+            case connection(TelegramRelayConnection)
+            case directRedirectOnly
+            case none
         }
 
-        let fallbackOrder = fallbackOrder(for: settings)
+        return try await withThrowingTaskGroup(of: RelayAttempt.self) { group in
+            if let targetIP, !directWSBlacklisted {
+                group.addTask {
+                    do {
+                        if let socket = try await self.connectDirectWebSocket(
+                            targetIP: targetIP,
+                            domains: domains,
+                            timeout: directTimeout,
+                            logger: logger
+                        ) {
+                            return .connection(.webSocket(socket))
+                        }
+                        return .none
+                    } catch DirectWebSocketConnectError.redirectOnly {
+                        return .directRedirectOnly
+                    } catch {
+                        return .none
+                    }
+                }
+            }
 
-        for fallback in fallbackOrder {
-            switch fallback {
-            case .cfProxy:
+            if settings.cfProxyEnabled {
                 let cfDomain = "kws\(handshake.dcID).\(settings.cfProxyDomain)"
-                logger.append(.info, "Connecting CF proxy \(cfDomain)")
-                do {
-                    let ws = try await RawWebSocket.connect(
-                        ip: cfDomain,
-                        domain: cfDomain,
-                        timeout: fallbackRelayTimeout
-                    )
-                    await routeState.markDirectWSFailure(for: routeKey, duration: directWSCooldown)
-                    return .webSocket(ws)
-                } catch is CancellationError {
-                    throw CancellationError()
-                } catch {
-                    logger.append(.warning, "CF proxy failed for DC\(handshake.dcID)\(mediaTag): \(error.localizedDescription)")
-                }
-            case .tcp:
-                guard let fallbackIP else { continue }
-                let permit = await self.concurrencyLimiter.acquire(
-                    routeKey: routeKey,
-                    limit: max(1, min(settings.poolSize, 4))
-                )
-                logger.append(.info, "Connecting TCP fallback \(fallbackIP):443")
-                do {
-                    let tcp = try await RawTCPRelay.connect(
-                        ip: fallbackIP,
-                        timeout: fallbackRelayTimeout
-                    )
-                    await routeState.markDirectWSFailure(for: routeKey, duration: directWSCooldown)
-                    return .tcp(tcp, permit)
-                } catch is CancellationError {
-                    await permit.release()
-                    throw CancellationError()
-                } catch {
-                    await permit.release()
-                    logger.append(.warning, "TCP fallback failed for DC\(handshake.dcID)\(mediaTag): \(error.localizedDescription)")
+                group.addTask { [fallbackRelayTimeout] in
+                    logger.append(.info, "Connecting CF proxy \(cfDomain)")
+                    do {
+                        let ws = try await RawWebSocket.connect(
+                            ip: cfDomain,
+                            domain: cfDomain,
+                            timeout: fallbackRelayTimeout
+                        )
+                        return .connection(.webSocket(ws))
+                    } catch is CancellationError {
+                        throw CancellationError()
+                    } catch {
+                        logger.append(.warning, "CF proxy failed for DC\(handshake.dcID)\(mediaTag): \(error.localizedDescription)")
+                        return .none
+                    }
                 }
             }
-        }
 
-        throw RawWebSocket.WebSocketError.invalidHandshake("All Telegram relay endpoints failed for DC\(handshake.dcID)")
+            if let fallbackIP {
+                group.addTask { [fallbackRelayTimeout] in
+                    let permit = await self.concurrencyLimiter.acquire(
+                        routeKey: routeKey,
+                        limit: max(1, min(settings.poolSize, 4))
+                    )
+                    logger.append(.info, "Connecting TCP fallback \(fallbackIP):443")
+                    do {
+                        let tcp = try await RawTCPRelay.connect(
+                            ip: fallbackIP,
+                            timeout: fallbackRelayTimeout
+                        )
+                        return .connection(.tcp(tcp, permit))
+                    } catch is CancellationError {
+                        await permit.release()
+                        throw CancellationError()
+                    } catch {
+                        await permit.release()
+                        logger.append(.warning, "TCP fallback failed for DC\(handshake.dcID)\(mediaTag): \(error.localizedDescription)")
+                        return .none
+                    }
+                }
+            }
+
+            var sawCandidate = false
+            var sawDirectRedirectOnly = false
+            while let attempt = try await group.next() {
+                sawCandidate = true
+                switch attempt {
+                case .connection(let candidate):
+                    if case .webSocket = candidate {
+                        await routeState.clearDirectWSFailure(for: routeKey)
+                    } else {
+                        await routeState.markDirectWSFailure(for: routeKey, duration: directWSCooldown)
+                    }
+                    group.cancelAll()
+                    return candidate
+                case .directRedirectOnly:
+                    sawDirectRedirectOnly = true
+                case .none:
+                    continue
+                }
+            }
+
+            if !sawCandidate {
+                throw RawWebSocket.WebSocketError.invalidHandshake("No relay candidates configured for DC\(handshake.dcID)")
+            }
+            if targetIP != nil, !directWSBlacklisted {
+                if sawDirectRedirectOnly {
+                    await routeState.blacklistDirectWS(for: routeKey)
+                } else {
+                    await routeState.markDirectWSFailure(for: routeKey, duration: directWSCooldown)
+                }
+            }
+            throw RawWebSocket.WebSocketError.invalidHandshake("All Telegram relay endpoints failed for DC\(handshake.dcID)")
+        }
     }
 
     private enum DirectWebSocketConnectError: Error {
