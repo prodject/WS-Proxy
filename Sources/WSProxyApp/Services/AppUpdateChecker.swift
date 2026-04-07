@@ -82,6 +82,7 @@ final class AppUpdateChecker {
     private let latestReleaseURL = URL(string: "https://api.github.com/repos/prodject/WS-Proxy/releases/latest")!
     private let fallbackReleasePageURL = URL(string: "https://github.com/prodject/WS-Proxy/releases/latest")!
     private let minimumCheckInterval: TimeInterval
+    private let inaccessibleSourceMessage = "GitHub releases are not publicly accessible for prodject/WS-Proxy"
 
     init(
         session: URLSession = .shared,
@@ -129,7 +130,7 @@ final class AppUpdateChecker {
         } catch {
             let fallbackStatus = await fallbackWebCheck(currentVersion: currentVersion, etag: nil)
             if case .failed = fallbackStatus {
-                return .failed(error.localizedDescription)
+                return .failed(normalizeUpdateError(error.localizedDescription))
             }
             return fallbackStatus
         }
@@ -151,7 +152,7 @@ final class AppUpdateChecker {
                 return .failed("Unexpected update page response")
             }
             guard (200...299).contains(httpResponse.statusCode), let finalURL = httpResponse.url else {
-                return .failed("Update check failed with HTTP \(httpResponse.statusCode)")
+                return .failed(normalizeUpdateError("Update check failed with HTTP \(httpResponse.statusCode)"))
             }
 
             let tagName = extractTagName(from: finalURL)
@@ -169,7 +170,7 @@ final class AppUpdateChecker {
             persist(release: release, etag: httpResponse.value(forHTTPHeaderField: "ETag"))
             return makeStatus(from: release, currentVersion: currentVersion)
         } catch {
-            return .failed(error.localizedDescription)
+            return .failed(normalizeUpdateError(error.localizedDescription))
         }
     }
 
@@ -218,6 +219,13 @@ final class AppUpdateChecker {
             downloadURL: release.assets.first(where: { $0.isIPA })?.browserDownloadURL
         )
         return .updateAvailable(info)
+    }
+
+    private func normalizeUpdateError(_ message: String) -> String {
+        if message.contains("HTTP 404") {
+            return inaccessibleSourceMessage
+        }
+        return message
     }
 
     private func extractTagName(from url: URL) -> String {

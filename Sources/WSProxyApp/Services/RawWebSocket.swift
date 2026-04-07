@@ -36,48 +36,56 @@ final class RawWebSocket: @unchecked Sendable {
         path: String = "/apiws",
         timeout: TimeInterval = 10
     ) async throws -> RawWebSocket {
-        let nwHost = NWEndpoint.Host(ip)
-        let tlsOptions = NWProtocolTLS.Options()
-        sec_protocol_options_set_tls_server_name(tlsOptions.securityProtocolOptions, domain)
-        sec_protocol_options_set_verify_block(
-            tlsOptions.securityProtocolOptions,
-            { _, _, complete in
-                complete(true)
-            },
-            .global(qos: .utility)
-        )
-        let parameters = NWParameters(tls: tlsOptions)
-        parameters.allowLocalEndpointReuse = true
+        try await withTimeout(seconds: timeout) {
+            let nwHost = NWEndpoint.Host(ip)
+            let tlsOptions = NWProtocolTLS.Options()
+            sec_protocol_options_set_tls_server_name(tlsOptions.securityProtocolOptions, domain)
+            sec_protocol_options_set_verify_block(
+                tlsOptions.securityProtocolOptions,
+                { _, _, complete in
+                    complete(true)
+                },
+                .global(qos: .utility)
+            )
+            let parameters = NWParameters(tls: tlsOptions)
+            parameters.allowLocalEndpointReuse = true
 
-        let connection = NWConnection(host: nwHost, port: 443, using: parameters)
-        connection.start(queue: .global(qos: .utility))
-        try await waitUntilReady(connection, timeout: timeout)
+            let connection = NWConnection(host: nwHost, port: 443, using: parameters)
+            connection.start(queue: .global(qos: .utility))
 
-        let wsKey = Data((0..<16).map { _ in UInt8.random(in: .min ... .max) }).base64EncodedString()
-        let request = """
-        GET \(path) HTTP/1.1\r
-        Host: \(domain)\r
-        Upgrade: websocket\r
-        Connection: Upgrade\r
-        Sec-WebSocket-Key: \(wsKey)\r
-        Sec-WebSocket-Version: 13\r
-        Sec-WebSocket-Protocol: binary\r
-        Origin: https://web.telegram.org\r
-        User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36\r
-        \r
-        """
+            do {
+                try await waitUntilReady(connection, timeout: timeout)
 
-        try await Self.sendData(connection: connection, data: Data(request.utf8))
-        let response = try await readHTTPResponse(from: connection, timeout: timeout)
-        let status = parseStatusCode(response)
-        guard status == 101 else {
-            throw WebSocketError.invalidHandshake(response)
+                let wsKey = Data((0..<16).map { _ in UInt8.random(in: .min ... .max) }).base64EncodedString()
+                let request = """
+                GET \(path) HTTP/1.1\r
+                Host: \(domain)\r
+                Upgrade: websocket\r
+                Connection: Upgrade\r
+                Sec-WebSocket-Key: \(wsKey)\r
+                Sec-WebSocket-Version: 13\r
+                Sec-WebSocket-Protocol: binary\r
+                Origin: https://web.telegram.org\r
+                User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36\r
+                \r
+                """
+
+                try await Self.sendData(connection: connection, data: Data(request.utf8))
+                let response = try await readHTTPResponse(from: connection, timeout: timeout)
+                let status = parseStatusCode(response)
+                guard status == 101 else {
+                    throw WebSocketError.invalidHandshake(response)
+                }
+
+                return RawWebSocket(
+                    reader: AsyncByteStreamReader(connection: connection),
+                    writer: connection
+                )
+            } catch {
+                connection.cancel()
+                throw error
+            }
         }
-
-        return RawWebSocket(
-            reader: AsyncByteStreamReader(connection: connection),
-            writer: connection
-        )
     }
 
     func send(_ data: Data) async throws {
@@ -243,6 +251,24 @@ final class RawWebSocket: @unchecked Sendable {
         return Data(data.enumerated().map { index, byte in
             byte ^ mask[index % mask.count]
         })
+    }
+
+    static func withTimeout<T: Sendable>(
+        seconds: TimeInterval,
+        operation: @escaping @Sendable () async throws -> T
+    ) async throws -> T {
+        try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask {
+                try await operation()
+            }
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                throw WebSocketError.closed
+            }
+            let result = try await group.next()!
+            group.cancelAll()
+            return result
+        }
     }
 }
 

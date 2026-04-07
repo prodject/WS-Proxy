@@ -23,20 +23,27 @@ final class RawTCPRelay: @unchecked Sendable {
     }
 
     static func connect(ip: String, port: UInt16 = 443, timeout: TimeInterval = 10) async throws -> RawTCPRelay {
-        guard let endpointPort = NWEndpoint.Port(rawValue: port) else {
-            throw TCPRelayError.closed
+        try await RawWebSocket.withTimeout(seconds: timeout) {
+            guard let endpointPort = NWEndpoint.Port(rawValue: port) else {
+                throw TCPRelayError.closed
+            }
+            let connection = NWConnection(
+                host: NWEndpoint.Host(ip),
+                port: endpointPort,
+                using: .tcp
+            )
+            connection.start(queue: .global(qos: .utility))
+            do {
+                try await RawWebSocket.waitUntilReady(connection, timeout: timeout)
+                return RawTCPRelay(
+                    reader: AsyncByteStreamReader(connection: connection),
+                    writer: connection
+                )
+            } catch {
+                connection.cancel()
+                throw error
+            }
         }
-        let connection = NWConnection(
-            host: NWEndpoint.Host(ip),
-            port: endpointPort,
-            using: .tcp
-        )
-        connection.start(queue: .global(qos: .utility))
-        try await RawWebSocket.waitUntilReady(connection, timeout: timeout)
-        return RawTCPRelay(
-            reader: AsyncByteStreamReader(connection: connection),
-            writer: connection
-        )
     }
 
     func send(_ data: Data) async throws {
