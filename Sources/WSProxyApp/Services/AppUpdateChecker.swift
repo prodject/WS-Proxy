@@ -120,10 +120,52 @@ final class AppUpdateChecker {
             }
 
             guard httpResponse.statusCode == 200 else {
-                return .failed("Update check failed with HTTP \(httpResponse.statusCode)")
+                return await fallbackWebCheck(currentVersion: currentVersion, etag: httpResponse.value(forHTTPHeaderField: "ETag"))
             }
 
             let release = try JSONDecoder().decode(GitHubRelease.self, from: data)
+            persist(release: release, etag: httpResponse.value(forHTTPHeaderField: "ETag"))
+            return makeStatus(from: release, currentVersion: currentVersion)
+        } catch {
+            let fallbackStatus = await fallbackWebCheck(currentVersion: currentVersion, etag: nil)
+            if case .failed = fallbackStatus {
+                return .failed(error.localizedDescription)
+            }
+            return fallbackStatus
+        }
+    }
+
+    private func fallbackWebCheck(
+        currentVersion: AppReleaseVersion,
+        etag: String?
+    ) async -> AppUpdateStatus {
+        do {
+            var request = URLRequest(url: fallbackReleasePageURL)
+            request.setValue("WSProxy-iOS-UpdateCheck", forHTTPHeaderField: "User-Agent")
+            if let etag, !etag.isEmpty {
+                request.setValue(etag, forHTTPHeaderField: "If-None-Match")
+            }
+
+            let (data, response) = try await session.data(for: request)
+            guard let httpResponse = response as? HTTPURLResponse else {
+                return .failed("Unexpected update page response")
+            }
+            guard (200...299).contains(httpResponse.statusCode), let finalURL = httpResponse.url else {
+                return .failed("Update check failed with HTTP \(httpResponse.statusCode)")
+            }
+
+            let tagName = extractTagName(from: finalURL)
+            guard !tagName.isEmpty else {
+                return .failed("Unable to parse latest release")
+            }
+
+            let html = String(decoding: data, as: UTF8.self)
+            let ipaURL = extractIPAURL(fromHTML: html)
+            let release = GitHubRelease(
+                tagName: tagName,
+                htmlURL: finalURL,
+                assets: ipaURL.map { [GitHubRelease.Asset(name: $0.lastPathComponent, browserDownloadURL: $0)] } ?? []
+            )
             persist(release: release, etag: httpResponse.value(forHTTPHeaderField: "ETag"))
             return makeStatus(from: release, currentVersion: currentVersion)
         } catch {
@@ -177,6 +219,27 @@ final class AppUpdateChecker {
         )
         return .updateAvailable(info)
     }
+
+    private func extractTagName(from url: URL) -> String {
+        let components = url.pathComponents
+        guard let tagIndex = components.firstIndex(of: "tag"), tagIndex + 1 < components.count else {
+            return ""
+        }
+        return components[tagIndex + 1]
+    }
+
+    private func extractIPAURL(fromHTML html: String) -> URL? {
+        let pattern = #"https://github\.com/[^"]+\.ipa"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else {
+            return nil
+        }
+        let range = NSRange(html.startIndex..<html.endIndex, in: html)
+        guard let match = regex.firstMatch(in: html, range: range),
+              let matchRange = Range(match.range, in: html) else {
+            return nil
+        }
+        return URL(string: String(html[matchRange]))
+    }
 }
 
 private struct GitHubRelease: Decodable {
@@ -192,6 +255,11 @@ private struct GitHubRelease: Decodable {
             case name
             case browserDownloadURL = "browser_download_url"
         }
+
+        init(name: String, browserDownloadURL: URL) {
+            self.name = name
+            self.browserDownloadURL = browserDownloadURL
+        }
     }
 
     let tagName: String
@@ -202,5 +270,11 @@ private struct GitHubRelease: Decodable {
         case tagName = "tag_name"
         case htmlURL = "html_url"
         case assets
+    }
+
+    init(tagName: String, htmlURL: URL, assets: [Asset]) {
+        self.tagName = tagName
+        self.htmlURL = htmlURL
+        self.assets = assets
     }
 }

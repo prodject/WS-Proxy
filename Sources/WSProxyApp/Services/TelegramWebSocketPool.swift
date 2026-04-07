@@ -7,6 +7,7 @@ actor TelegramWebSocketPool {
     }
 
     private let maxAge: TimeInterval = 120
+    private let connectTimeout: TimeInterval = 2.5
     private var entries: [String: [PoolEntry]] = [:]
     private var refillTasks: [String: Task<Void, Never>] = [:]
 
@@ -131,7 +132,7 @@ actor TelegramWebSocketPool {
     private func connect(targetIP: String, domains: [String]) async throws -> RawWebSocket? {
         for domain in domains {
             do {
-                return try await RawWebSocket.connect(ip: targetIP, domain: domain, timeout: 8)
+                return try await RawWebSocket.connect(ip: targetIP, domain: domain, timeout: connectTimeout)
             } catch RawWebSocket.WebSocketError.invalidHandshake(let response) {
                 if [301, 302, 303, 307, 308].contains(Self.firstStatusCode(response)) {
                     continue

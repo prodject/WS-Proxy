@@ -7,6 +7,8 @@ enum TelegramRelayConnection {
 
 final class TelegramWebSocketConnector {
     private let pool = TelegramWebSocketPool()
+    private let directWebSocketTimeout: TimeInterval = 2.5
+    private let fallbackRelayTimeout: TimeInterval = 4.0
 
     func connect(
         for handshake: MTProtoHandshake,
@@ -33,7 +35,11 @@ final class TelegramWebSocketConnector {
             for domain in domains {
                 do {
                     logger.append(.info, "Connecting WS \(domain) -> \(targetIP)")
-                    let ws = try await RawWebSocket.connect(ip: targetIP, domain: domain)
+                    let ws = try await RawWebSocket.connect(
+                        ip: targetIP,
+                        domain: domain,
+                        timeout: directWebSocketTimeout
+                    )
                     return .webSocket(ws)
                 } catch RawWebSocket.WebSocketError.invalidHandshake(let response) {
                     if Self.isRedirect(response) {
@@ -56,7 +62,11 @@ final class TelegramWebSocketConnector {
                 let cfDomain = "kws\(handshake.dcID).\(settings.cfProxyDomain)"
                 do {
                     logger.append(.info, "Connecting CF proxy \(cfDomain)")
-                    let ws = try await RawWebSocket.connect(ip: cfDomain, domain: cfDomain)
+                    let ws = try await RawWebSocket.connect(
+                        ip: cfDomain,
+                        domain: cfDomain,
+                        timeout: fallbackRelayTimeout
+                    )
                     return .webSocket(ws)
                 } catch is CancellationError {
                     throw CancellationError()
@@ -67,7 +77,10 @@ final class TelegramWebSocketConnector {
                 guard let fallbackIP = Self.defaultTargetIPs[handshake.dcID] else { continue }
                 do {
                     logger.append(.info, "Connecting TCP fallback \(fallbackIP):443")
-                    let tcp = try await RawTCPRelay.connect(ip: fallbackIP)
+                    let tcp = try await RawTCPRelay.connect(
+                        ip: fallbackIP,
+                        timeout: fallbackRelayTimeout
+                    )
                     return .tcp(tcp)
                 } catch is CancellationError {
                     throw CancellationError()
@@ -142,7 +155,7 @@ final class TelegramWebSocketConnector {
         var ids = settings.dcIP.compactMap { entry in
             try? DCMapping.parse(entry).dc
         }
-        ids.append(contentsOf: Self.defaultTargetIPs.keys)
+        ids.append(contentsOf: settings.dcIP.isEmpty ? [2, 4] : [])
         return ids
     }
 
