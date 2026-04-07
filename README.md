@@ -7,6 +7,8 @@ Native iOS app shell for a local Telegram MTProto proxy.
 - SwiftUI app shell
 - persisted proxy settings
 - `tg://proxy` link generation
+- local proxy listener scaffold on `Network.framework`
+- in-app log viewer
 - CI workflow that builds and publishes an `.ipa` artifact
 
 ## Project layout

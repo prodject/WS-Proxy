@@ -10,6 +10,7 @@ struct WSProxyApp: App {
         WindowGroup {
             RootView()
                 .environmentObject(appState)
+                .environmentObject(appState.logStore)
         }
     }
 }
