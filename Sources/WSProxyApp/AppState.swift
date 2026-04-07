@@ -93,6 +93,7 @@ final class AppState: ObservableObject {
     func checkForUpdatesIfNeeded() async {
         guard settings.checkUpdates, !didRunAutomaticUpdateCheck else { return }
         didRunAutomaticUpdateCheck = true
+        logStore.append(.info, "Checking for updates on launch")
         await refreshUpdates(force: false)
     }
 
@@ -106,6 +107,8 @@ final class AppState: ObservableObject {
         if case .updateAvailable(let info) = status {
             availableUpdate = info
             logStore.append(.info, "Update available: \(info.latestVersion)")
+        } else if case .upToDate(let version) = status {
+            logStore.append(.info, "Already up to date: \(version)")
         } else if case .failed(let message) = status {
             logStore.append(.warning, "Update check failed: \(message)")
         }

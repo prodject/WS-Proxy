@@ -119,6 +119,9 @@ struct RootView: View {
                         secondaryButton: .cancel()
                     )
                 }
+                .task {
+                    await appState.checkForUpdatesIfNeeded()
+                }
             }
             .tabItem {
                 Label("Settings", systemImage: "slider.horizontal.3")

@@ -8,7 +8,7 @@ enum TelegramRelayConnection {
 final class TelegramWebSocketConnector {
     private let pool = TelegramWebSocketPool()
     private let routeState = TelegramRelayRouteState()
-    private let concurrencyLimiter = TelegramRelayConcurrencyLimiter(defaultLimit: 2)
+    private let concurrencyLimiter = TelegramRelayConcurrencyLimiter(defaultLimit: 4)
     private let directWebSocketTimeout: TimeInterval = 2.5
     private let fallbackRelayTimeout: TimeInterval = 4.0
     private let directWSCooldown: TimeInterval = 300
@@ -158,7 +158,7 @@ final class TelegramWebSocketConnector {
                 group.addTask { [fallbackRelayTimeout] in
                     let permit = await self.concurrencyLimiter.acquire(
                         routeKey: routeKey,
-                        limit: max(1, min(settings.poolSize, 2))
+                        limit: max(1, min(settings.poolSize, 4))
                     )
                     logger.append(.info, "Connecting TCP fallback \(fallbackIP):443")
                     do {
