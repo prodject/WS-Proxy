@@ -16,6 +16,7 @@ final class LocalProxyEngine: ProxyEngine {
     private let queue = DispatchQueue(label: "wsproxy.localproxy")
     private var listener: NWListener?
     private var sessions: [UUID: ProxyConnectionSession] = [:]
+    private let connector = TelegramWebSocketConnector()
 
     func start(with settings: ProxySettings, logger: ProxyLogStore) async throws {
         try settings.validate()
@@ -35,6 +36,8 @@ final class LocalProxyEngine: ProxyEngine {
             let session = ProxyConnectionSession(
                 connection: connection,
                 logger: logger,
+                settings: settings,
+                connector: self.connector,
                 onClose: { [weak self] id in
                     self?.queue.async {
                         self?.sessions[id] = nil
