@@ -4,8 +4,6 @@ on:
   push:
     branches:
       - main
-    tags:
-      - "v*"
   workflow_dispatch:
 
 permissions:
@@ -18,22 +16,24 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Determine version
         id: version
         shell: bash
         run: |
           set -euo pipefail
-          if [[ "${GITHUB_REF_TYPE:-}" == "tag" && "${GITHUB_REF_NAME:-}" == v* ]]; then
-            APP_VERSION="${GITHUB_REF_NAME#v}"
-          else
-            APP_VERSION="0.1.0-dev"
-          fi
+          APP_VERSION="$(awk '/MARKETING_VERSION:/ { print $2; exit }' project.yml)"
           BUILD_NUMBER="${GITHUB_RUN_NUMBER}"
-          IPA_NAME="WSProxy-${APP_VERSION}+${BUILD_NUMBER}.ipa"
+          RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT}"
+          TAG_NAME="v${APP_VERSION}-build${BUILD_NUMBER}-a${RUN_ATTEMPT}"
+          IPA_NAME="WSProxy-${APP_VERSION}+${BUILD_NUMBER}.${RUN_ATTEMPT}.ipa"
           {
             echo "app_version=${APP_VERSION}"
             echo "build_number=${BUILD_NUMBER}"
+            echo "run_attempt=${RUN_ATTEMPT}"
+            echo "tag_name=${TAG_NAME}"
             echo "ipa_name=${IPA_NAME}"
           } >> "${GITHUB_OUTPUT}"
 
@@ -54,10 +54,21 @@ jobs:
           path: ${{ steps.version.outputs.ipa_name }}
           if-no-files-found: error
 
-      - name: Upload release asset
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Create tag
+        if: github.ref == 'refs/heads/main'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "${{ steps.version.outputs.tag_name }}" -m "WS Proxy ${{ steps.version.outputs.tag_name }}"
+          git push origin "${{ steps.version.outputs.tag_name }}"
+
+      - name: Create release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.version.outputs.tag_name }}
           files: ${{ steps.version.outputs.ipa_name }}
+          generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

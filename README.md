@@ -28,8 +28,7 @@ The repository is designed to be built on GitHub Actions without a local Xcode i
 CI uses XcodeGen to generate the Xcode project and then runs a single reproducible shell script on a macOS runner.
 The release workflow targets a macOS 15 runner with Xcode 16, which is required for the generated project format.
 
-Tag pushes like `v0.2.0` produce versioned artifacts such as `WSProxy-0.2.0+42.ipa`.
-Non-tag builds keep a dev-style version string.
+Successful `main` builds automatically create a git tag like `v0.1.0-build42-a1` and publish a GitHub Release with a versioned IPA such as `WSProxy-0.1.0+42.1.ipa`.
 
 ## Notes
 
