@@ -50,6 +50,7 @@ final class MTProtoStreamCipher {
         guard !data.isEmpty else { return data }
 
         var output = Data(count: data.count)
+        let count = data.count
         try data.withUnsafeBytes { srcBytes in
             try output.withUnsafeMutableBytes { dstBytes in
                 guard
@@ -59,7 +60,7 @@ final class MTProtoStreamCipher {
                     return
                 }
 
-                for index in 0..<data.count {
+                for index in 0..<count {
                     if keystreamOffset >= keystream.count {
                         try generateKeystreamBlock()
                     }
@@ -82,7 +83,7 @@ final class MTProtoStreamCipher {
                     inputBytes.baseAddress,
                     input.count,
                     outputBytes.baseAddress,
-                    output.count,
+                    outputBytes.count,
                     &moved
                 )
             }
