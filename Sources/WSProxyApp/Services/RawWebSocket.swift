@@ -1,11 +1,24 @@
 import Foundation
 import Network
+import Security
 
 final class RawWebSocket: @unchecked Sendable {
-    enum WebSocketError: Error {
+    enum WebSocketError: LocalizedError {
         case emptyResponse
         case invalidHandshake(String)
         case closed
+
+        var errorDescription: String? {
+            switch self {
+            case .emptyResponse:
+                return "Empty WebSocket handshake response"
+            case .invalidHandshake(let response):
+                let firstLine = response.components(separatedBy: "\r\n").first ?? response
+                return "Invalid WebSocket handshake: \(firstLine)"
+            case .closed:
+                return "WebSocket closed"
+            }
+        }
     }
 
     private let reader: AsyncByteStreamReader
@@ -24,7 +37,9 @@ final class RawWebSocket: @unchecked Sendable {
         timeout: TimeInterval = 10
     ) async throws -> RawWebSocket {
         let nwHost = NWEndpoint.Host(ip)
-        let parameters = NWParameters.tls
+        let tlsOptions = NWProtocolTLS.Options()
+        sec_protocol_options_set_tls_server_name(tlsOptions.securityProtocolOptions, domain)
+        let parameters = NWParameters(tls: tlsOptions)
         parameters.allowLocalEndpointReuse = true
 
         let connection = NWConnection(host: nwHost, port: 443, using: parameters)

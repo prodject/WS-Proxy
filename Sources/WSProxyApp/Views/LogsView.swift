@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct LogsView: View {
     @EnvironmentObject private var logStore: ProxyLogStore
@@ -35,8 +36,13 @@ struct LogsView: View {
         }
         .navigationTitle("Logs")
         .toolbar {
-            Button("Clear") {
-                logStore.clear()
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                Button("Copy") {
+                    UIPasteboard.general.string = logStore.plainText()
+                }
+                Button("Clear") {
+                    logStore.clear()
+                }
             }
         }
     }

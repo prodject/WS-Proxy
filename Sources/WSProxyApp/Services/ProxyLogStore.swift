@@ -34,9 +34,26 @@ final class ProxyLogStore: ObservableObject {
         }
     }
 
+    func plainText() -> String {
+        let formatter = Self.timestampFormatter
+        return entries.map { entry in
+            let stamp = formatter.string(from: entry.timestamp)
+            return "[\(stamp)] [\(entry.level.rawValue.uppercased())] \(entry.message)"
+        }
+        .joined(separator: "\n")
+    }
+
     func seedWithPlaceholder() {
         guard entries.isEmpty else { return }
         append(.info, "Proxy app launched")
         append(.info, "Waiting for user to start the proxy engine")
     }
+
+    private static let timestampFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss"
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = .current
+        return formatter
+    }()
 }
