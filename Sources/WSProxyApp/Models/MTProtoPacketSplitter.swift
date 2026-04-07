@@ -11,7 +11,11 @@ final class MTProtoPacketSplitter {
     init(inspectorCipher: MTProtoStreamCipher, transport: MTProtoTransport) {
         self.inspectorCipher = inspectorCipher
         self.transport = transport
-        try? self.inspectorCipher.transform(Data(repeating: 0, count: 64))
+        do {
+            _ = try self.inspectorCipher.transform(Data(repeating: 0, count: 64))
+        } catch {
+            isDisabled = true
+        }
     }
 
     func split(_ chunk: Data) -> [Data] {

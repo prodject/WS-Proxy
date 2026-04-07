@@ -72,7 +72,7 @@ final class MTProtoStreamCipher {
     }
 
     private func generateKeystreamBlock() throws {
-        var input = counter
+        let input = counter
         var output = [UInt8](repeating: 0, count: 16)
         var moved: size_t = 0
         let status = input.withUnsafeBytes { inputBytes in
@@ -158,7 +158,7 @@ struct MTProtoBridgeContext {
     }
 
     func flushClientTail() throws -> [Data] {
-        try lock.withLock {
+        lock.withLock {
             packetSplitter.flush()
         }
     }

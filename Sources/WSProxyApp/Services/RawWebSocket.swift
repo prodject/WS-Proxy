@@ -61,14 +61,14 @@ final class RawWebSocket {
     func send(_ data: Data) async throws {
         guard !isClosed else { throw WebSocketError.closed }
         let frame = Self.buildFrame(opcode: 0x2, data: data, mask: true)
-        try await send(connection: writer, data: frame)
+        try await Self.sendData(connection: writer, data: frame)
     }
 
     func sendBatch(_ parts: [Data]) async throws {
         guard !isClosed else { throw WebSocketError.closed }
         for part in parts {
             let frame = Self.buildFrame(opcode: 0x2, data: part, mask: true)
-            try await send(connection: writer, data: frame)
+            try await Self.sendData(connection: writer, data: frame)
         }
     }
 
@@ -79,11 +79,11 @@ final class RawWebSocket {
             switch opcode {
             case 0x8:
                 isClosed = true
-                try? await send(connection: writer, data: Self.buildFrame(opcode: 0x8, data: payload.prefix(2), mask: true))
+                try? await Self.sendData(connection: writer, data: Self.buildFrame(opcode: 0x8, data: payload.prefix(2), mask: true))
                 writer.cancel()
                 return nil
             case 0x9:
-                try? await send(connection: writer, data: Self.buildFrame(opcode: 0xA, data: payload, mask: true))
+                try? await Self.sendData(connection: writer, data: Self.buildFrame(opcode: 0xA, data: payload, mask: true))
                 continue
             case 0xA:
                 continue
@@ -99,7 +99,7 @@ final class RawWebSocket {
     func close() async {
         guard !isClosed else { return }
         isClosed = true
-        try? await send(connection: writer, data: Self.buildFrame(opcode: 0x8, data: Data(), mask: true))
+        try? await Self.sendData(connection: writer, data: Self.buildFrame(opcode: 0x8, data: Data(), mask: true))
         writer.cancel()
     }
 
@@ -143,8 +143,8 @@ final class RawWebSocket {
         }
     }
 
-    private static func send(connection: NWConnection, data: Data) async throws {
-        try await withCheckedThrowingContinuation { continuation in
+    private static func sendData(connection: NWConnection, data: Data) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             connection.send(content: data, completion: .contentProcessed { error in
                 if let error {
                     continuation.resume(throwing: error)
@@ -260,12 +260,15 @@ final class AsyncByteStreamReader {
             return Data(chunk)
         }
         guard !isFinished else { return Data() }
-        return try await withCheckedThrowingContinuation { continuation in
+        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data, Error>) in
             connection.receive(
                 minimumIncompleteLength: 1,
                 maximumLength: maxLength
             ) { [weak self] data, _, isComplete, error in
-                guard let self else { return }
+                guard let self else {
+                    continuation.resume(returning: Data())
+                    return
+                }
                 if let error {
                     continuation.resume(throwing: error)
                     return

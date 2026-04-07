@@ -209,7 +209,7 @@ final class ProxyConnectionSession {
     }
 
     private func writeToClient(_ data: Data) async throws {
-        try await withCheckedThrowingContinuation { continuation in
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             connection.send(content: data, completion: .contentProcessed { error in
                 if let error {
                     continuation.resume(throwing: error)
@@ -265,11 +265,13 @@ final class ProxyConnectionSession {
         case .hostPort(let host, let port):
             return "\(host):\(port)"
         case .service(let name, let type, let domain, _):
-            return "\(name ?? "?").\(type).\(domain)"
+            return "\(name).\(type).\(domain)"
         case .unix(let path):
             return path
         case .url(let url):
             return url.absoluteString
+        case .opaque:
+            return "opaque"
         @unknown default:
             return "unknown"
         }
