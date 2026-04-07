@@ -5,6 +5,7 @@ struct RootView: View {
     @EnvironmentObject private var appState: AppState
     @Environment(\.openURL) private var openURL
     @State private var proxyLinkAlert = false
+    @State private var presentedUpdate: AppUpdateInfo?
 
     var body: some View {
         TabView {
@@ -109,7 +110,7 @@ struct RootView: View {
                 } message: {
                     Text(appState.generatedProxyURL?.absoluteString ?? "Unavailable")
                 }
-                .alert(item: $appState.availableUpdate) { update in
+                .alert(item: $presentedUpdate) { update in
                     Alert(
                         title: Text("Update available"),
                         message: Text("Installed: \(update.currentVersion)\nLatest: \(update.latestVersion)"),
@@ -121,6 +122,12 @@ struct RootView: View {
                 }
                 .task {
                     await appState.checkForUpdatesIfNeeded()
+                    if let update = appState.availableUpdate {
+                        presentedUpdate = update
+                    }
+                }
+                .onChange(of: appState.availableUpdate?.id) { _, _ in
+                    presentedUpdate = appState.availableUpdate
                 }
             }
             .tabItem {

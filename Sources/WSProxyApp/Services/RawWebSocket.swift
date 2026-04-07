@@ -55,6 +55,7 @@ final class RawWebSocket: @unchecked Sendable {
 
             do {
                 try await waitUntilReady(connection, timeout: timeout)
+                let reader = AsyncByteStreamReader(connection: connection)
 
                 let wsKey = Data((0..<16).map { _ in UInt8.random(in: .min ... .max) }).base64EncodedString()
                 let request = """
@@ -71,14 +72,14 @@ final class RawWebSocket: @unchecked Sendable {
                 """
 
                 try await Self.sendData(connection: connection, data: Data(request.utf8))
-                let response = try await readHTTPResponse(from: connection, timeout: timeout)
+                let response = try await readHTTPResponse(from: reader, timeout: timeout)
                 let status = parseStatusCode(response)
                 guard status == 101 else {
                     throw WebSocketError.invalidHandshake(response)
                 }
 
                 return RawWebSocket(
-                    reader: AsyncByteStreamReader(connection: connection),
+                    reader: reader,
                     writer: connection
                 )
             } catch {
@@ -185,8 +186,7 @@ final class RawWebSocket: @unchecked Sendable {
         }
     }
 
-    private static func readHTTPResponse(from connection: NWConnection, timeout: TimeInterval) async throws -> String {
-        let reader = AsyncByteStreamReader(connection: connection)
+    private static func readHTTPResponse(from reader: AsyncByteStreamReader, timeout: TimeInterval) async throws -> String {
         var bytes = Data()
         let deadline = Date().addingTimeInterval(timeout)
         while !bytes.containsCRLFCRLF {
