@@ -16,10 +16,10 @@ final class TelegramWebSocketConnector {
         logger: ProxyLogStore
     ) async throws -> TelegramRelayConnection {
         let domains = wsDomains(for: handshake.dcID, isMedia: handshake.isMedia)
-        let targetIPs = targetIPs(for: handshake.dcID, settings: settings)
+        let targetIP = directTargetIP(for: handshake.dcID, settings: settings)
         let mediaTag = handshake.isMedia ? "m" : ""
 
-        for targetIP in targetIPs {
+        if let targetIP {
             let poolKey = "dc\(handshake.dcID)\(handshake.isMedia ? "m" : "")@\(targetIP)"
             if let pooled = await pool.checkout(
                 key: poolKey,
@@ -32,26 +32,12 @@ final class TelegramWebSocketConnector {
                 return .webSocket(pooled)
             }
 
-            for domain in domains {
-                do {
-                    logger.append(.info, "Connecting WS \(domain) -> \(targetIP)")
-                    let ws = try await RawWebSocket.connect(
-                        ip: targetIP,
-                        domain: domain,
-                        timeout: directWebSocketTimeout
-                    )
-                    return .webSocket(ws)
-                } catch RawWebSocket.WebSocketError.invalidHandshake(let response) {
-                    if Self.isRedirect(response) {
-                        logger.append(.warning, "WS redirect for \(domain): \(Self.firstStatusLine(response))")
-                        continue
-                    }
-                    logger.append(.warning, "WS handshake failed for \(domain): \(Self.firstStatusLine(response))")
-                } catch is CancellationError {
-                    throw CancellationError()
-                } catch {
-                    logger.append(.warning, "WS connect failed for \(domain): \(error.localizedDescription)")
-                }
+            if let ws = try await connectDirectWebSocket(
+                targetIP: targetIP,
+                domains: domains,
+                logger: logger
+            ) {
+                return .webSocket(ws)
             }
         }
 
@@ -108,20 +94,18 @@ final class TelegramWebSocketConnector {
     func warmup(settings: ProxySettings, logger: ProxyLogStore) {
         guard settings.poolSize > 0 else { return }
         for dcID in Set(targetDCIDs(from: settings)) {
-            let targetIPs = targetIPs(for: dcID, settings: settings)
-            for targetIP in targetIPs {
-                for isMedia in [false, true] {
-                    let domains = wsDomains(for: dcID, isMedia: isMedia)
-                    let poolKey = "dc\(dcID)\(isMedia ? "m" : "")@\(targetIP)"
-                    Task {
-                        await pool.warm(
-                            key: poolKey,
-                            targetIP: targetIP,
-                            domains: domains,
-                            desiredSize: settings.poolSize,
-                            logger: logger
-                        )
-                    }
+            guard let targetIP = directTargetIP(for: dcID, settings: settings) else { continue }
+            for isMedia in [false, true] {
+                let domains = wsDomains(for: dcID, isMedia: isMedia)
+                let poolKey = "dc\(dcID)\(isMedia ? "m" : "")@\(targetIP)"
+                Task {
+                    await pool.warm(
+                        key: poolKey,
+                        targetIP: targetIP,
+                        domains: domains,
+                        desiredSize: settings.poolSize,
+                        logger: logger
+                    )
                 }
             }
         }
@@ -131,24 +115,13 @@ final class TelegramWebSocketConnector {
         await pool.shutdown()
     }
 
-    private func targetIPs(for dcID: Int, settings: ProxySettings) -> [String] {
-        var candidates: [String] = []
+    private func directTargetIP(for dcID: Int, settings: ProxySettings) -> String? {
         for entry in settings.dcIP {
             if let mapping = try? DCMapping.parse(entry), mapping.dc == dcID {
-                candidates.append(mapping.ip)
-                break
+                return mapping.ip
             }
         }
-
-        if let fallback = Self.defaultTargetIPs[dcID], !candidates.contains(fallback) {
-            candidates.append(fallback)
-        }
-
-        if candidates.isEmpty {
-            candidates.append("149.154.167.220")
-        }
-
-        return candidates
+        return Self.defaultTargetIPs[dcID]
     }
 
     private func targetDCIDs(from settings: ProxySettings) -> [Int] {
@@ -164,6 +137,61 @@ final class TelegramWebSocketConnector {
             return ["kws\(dcID)-1.web.telegram.org", "kws\(dcID).web.telegram.org"]
         }
         return ["kws\(dcID).web.telegram.org", "kws\(dcID)-1.web.telegram.org"]
+    }
+
+    private func connectDirectWebSocket(
+        targetIP: String,
+        domains: [String],
+        logger: ProxyLogStore
+    ) async throws -> RawWebSocket? {
+        try await withThrowingTaskGroup(of: (String, Result<RawWebSocket, Error>).self) { group in
+            for domain in domains {
+                group.addTask { [directWebSocketTimeout] in
+                    do {
+                        let ws = try await RawWebSocket.connect(
+                            ip: targetIP,
+                            domain: domain,
+                            timeout: directWebSocketTimeout
+                        )
+                        return (domain, .success(ws))
+                    } catch {
+                        return (domain, .failure(error))
+                    }
+                }
+                logger.append(.info, "Connecting WS \(domain) -> \(targetIP)")
+            }
+
+            var firstError: Error?
+            while let (domain, result) = try await group.next() {
+                switch result {
+                case .success(let ws):
+                    group.cancelAll()
+                    return ws
+                case .failure(let error as CancellationError):
+                    group.cancelAll()
+                    throw error
+                case .failure(let error as RawWebSocket.WebSocketError):
+                    if case .invalidHandshake(let response) = error, Self.isRedirect(response) {
+                        logger.append(.warning, "WS redirect for \(domain): \(Self.firstStatusLine(response))")
+                    } else {
+                        logger.append(.warning, "WS connect failed for \(domain): \(error.localizedDescription)")
+                    }
+                    if firstError == nil {
+                        firstError = error
+                    }
+                case .failure(let error):
+                    logger.append(.warning, "WS connect failed for \(domain): \(error.localizedDescription)")
+                    if firstError == nil {
+                        firstError = error
+                    }
+                }
+            }
+
+            if let firstError {
+                throw firstError
+            }
+            return nil
+        }
     }
 
     private static let defaultTargetIPs: [Int: String] = [
