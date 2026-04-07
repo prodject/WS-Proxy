@@ -1,7 +1,7 @@
 import Foundation
 import Network
 
-final class RawWebSocket {
+final class RawWebSocket: @unchecked Sendable {
     enum WebSocketError: Error {
         case emptyResponse
         case invalidHandshake(String)
@@ -230,7 +230,7 @@ private extension Data {
     }
 }
 
-final class AsyncByteStreamReader {
+final class AsyncByteStreamReader: @unchecked Sendable {
     private let connection: NWConnection
     private var buffer = Data()
     private var isFinished = false

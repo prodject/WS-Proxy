@@ -12,7 +12,7 @@ protocol ProxyEngine {
     func stop(logger: ProxyLogStore) async throws
 }
 
-final class LocalProxyEngine: ProxyEngine {
+final class LocalProxyEngine: ProxyEngine, @unchecked Sendable {
     private let queue = DispatchQueue(label: "wsproxy.localproxy")
     private var listener: NWListener?
     private var sessions: [UUID: ProxyConnectionSession] = [:]

@@ -1,7 +1,7 @@
 import Foundation
 import Network
 
-final class ProxyConnectionSession {
+final class ProxyConnectionSession: @unchecked Sendable {
     let id = UUID()
     private let connection: NWConnection
     private let logger: ProxyLogStore
