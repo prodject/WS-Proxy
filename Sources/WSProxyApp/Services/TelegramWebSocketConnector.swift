@@ -7,8 +7,10 @@ enum TelegramRelayConnection {
 
 final class TelegramWebSocketConnector {
     private let pool = TelegramWebSocketPool()
+    private let routeState = TelegramRelayRouteState()
     private let directWebSocketTimeout: TimeInterval = 2.5
     private let fallbackRelayTimeout: TimeInterval = 4.0
+    private let directWSCooldown: TimeInterval = 300
 
     func connect(
         for handshake: MTProtoHandshake,
@@ -18,8 +20,10 @@ final class TelegramWebSocketConnector {
         let mediaTag = handshake.isMedia ? "m" : ""
         let domains = wsDomains(for: handshake.dcID, isMedia: handshake.isMedia)
         let targetIP = directTargetIP(for: handshake.dcID, settings: settings)
+        let routeKey = "dc\(handshake.dcID)\(handshake.isMedia ? "m" : "")"
+        let directWSAllowed = await routeState.isDirectWSAllowed(for: routeKey)
 
-        if let targetIP {
+        if let targetIP, directWSAllowed {
             let poolKey = "dc\(handshake.dcID)\(handshake.isMedia ? "m" : "")@\(targetIP)"
             if let pooled = await pool.checkout(
                 key: poolKey,
@@ -31,12 +35,15 @@ final class TelegramWebSocketConnector {
                 logger.append(.info, "Using pooled WS for DC\(handshake.dcID)\(mediaTag) via \(targetIP)")
                 return .webSocket(pooled)
             }
+        } else if !directWSAllowed {
+            logger.append(.debug, "Skipping direct WS for \(routeKey) due to cooldown")
         }
 
         return try await raceRelayCandidates(
             handshake: handshake,
             settings: settings,
-            logger: logger
+            logger: logger,
+            allowDirectWS: directWSAllowed
         )
     }
 
@@ -59,7 +66,9 @@ final class TelegramWebSocketConnector {
             for isMedia in [false, true] {
                 let domains = wsDomains(for: dcID, isMedia: isMedia)
                 let poolKey = "dc\(dcID)\(isMedia ? "m" : "")@\(targetIP)"
+                let routeKey = "dc\(dcID)\(isMedia ? "m" : "")"
                 Task {
+                    guard await self.routeState.isDirectWSAllowed(for: routeKey) else { return }
                     await pool.warm(
                         key: poolKey,
                         targetIP: targetIP,
@@ -103,15 +112,17 @@ final class TelegramWebSocketConnector {
     private func raceRelayCandidates(
         handshake: MTProtoHandshake,
         settings: ProxySettings,
-        logger: ProxyLogStore
+        logger: ProxyLogStore,
+        allowDirectWS: Bool
     ) async throws -> TelegramRelayConnection {
         let mediaTag = handshake.isMedia ? "m" : ""
         let domains = wsDomains(for: handshake.dcID, isMedia: handshake.isMedia)
         let targetIP = directTargetIP(for: handshake.dcID, settings: settings)
         let fallbackIP = Self.defaultTargetIPs[handshake.dcID]
+        let routeKey = "dc\(handshake.dcID)\(handshake.isMedia ? "m" : "")"
 
         return try await withThrowingTaskGroup(of: TelegramRelayConnection?.self) { group in
-            if let targetIP {
+            if let targetIP, allowDirectWS {
                 group.addTask { [directWebSocketTimeout] in
                     try await self.connectDirectWebSocket(
                         targetIP: targetIP,
@@ -164,6 +175,11 @@ final class TelegramWebSocketConnector {
             while let candidate = try await group.next() {
                 sawCandidate = true
                 if let candidate {
+                    if case .webSocket = candidate {
+                        await routeState.clearDirectWSCooldown(for: routeKey)
+                    } else {
+                        await routeState.setDirectWSCooldown(for: routeKey, duration: directWSCooldown)
+                    }
                     group.cancelAll()
                     return candidate
                 }
@@ -171,6 +187,9 @@ final class TelegramWebSocketConnector {
 
             if !sawCandidate {
                 throw RawWebSocket.WebSocketError.invalidHandshake("No relay candidates configured for DC\(handshake.dcID)")
+            }
+            if allowDirectWS {
+                await routeState.setDirectWSCooldown(for: routeKey, duration: directWSCooldown)
             }
             throw RawWebSocket.WebSocketError.invalidHandshake("All Telegram relay endpoints failed for DC\(handshake.dcID)")
         }

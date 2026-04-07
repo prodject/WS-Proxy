@@ -42,7 +42,9 @@ final class ProxyConnectionSession: @unchecked Sendable {
             case .ready:
                 self.receiveNext()
             case .failed(let error):
-                self.logger.append(.error, "Connection failed: \(error.localizedDescription)")
+                if self.isActive {
+                    self.logger.append(.debug, "Connection failed: \(error.localizedDescription)")
+                }
                 self.finish()
             case .cancelled:
                 self.finish()
@@ -73,7 +75,9 @@ final class ProxyConnectionSession: @unchecked Sendable {
         ) { [weak self] data, _, isComplete, error in
             guard let self else { return }
             if let error {
-                self.logger.append(.warning, "Connection receive error: \(error.localizedDescription)")
+                if self.isActive {
+                    self.logger.append(.debug, "Connection receive error: \(error.localizedDescription)")
+                }
                 self.finish()
                 return
             }
@@ -214,7 +218,9 @@ final class ProxyConnectionSession: @unchecked Sendable {
                 try await writeToClient(plain)
                 logger.append(.debug, "Forwarded \(plain.count) bytes to client via TCP")
             } catch {
-                logger.append(.error, "TCP receive failed: \(error.localizedDescription)")
+                if isActive {
+                    logger.append(.debug, "TCP receive failed: \(error.localizedDescription)")
+                }
                 finish()
                 return
             }
