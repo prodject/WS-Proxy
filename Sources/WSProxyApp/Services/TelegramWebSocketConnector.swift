@@ -15,9 +15,9 @@ final class TelegramWebSocketConnector {
         settings: ProxySettings,
         logger: ProxyLogStore
     ) async throws -> TelegramRelayConnection {
+        let mediaTag = handshake.isMedia ? "m" : ""
         let domains = wsDomains(for: handshake.dcID, isMedia: handshake.isMedia)
         let targetIP = directTargetIP(for: handshake.dcID, settings: settings)
-        let mediaTag = handshake.isMedia ? "m" : ""
 
         if let targetIP {
             let poolKey = "dc\(handshake.dcID)\(handshake.isMedia ? "m" : "")@\(targetIP)"
@@ -31,52 +31,13 @@ final class TelegramWebSocketConnector {
                 logger.append(.info, "Using pooled WS for DC\(handshake.dcID)\(mediaTag) via \(targetIP)")
                 return .webSocket(pooled)
             }
-
-            if let ws = try await connectDirectWebSocket(
-                targetIP: targetIP,
-                domains: domains,
-                logger: logger
-            ) {
-                return .webSocket(ws)
-            }
         }
 
-        for fallback in fallbackOrder(for: settings) {
-            switch fallback {
-            case .cfProxy:
-                guard settings.cfProxyEnabled else { continue }
-                let cfDomain = "kws\(handshake.dcID).\(settings.cfProxyDomain)"
-                do {
-                    logger.append(.info, "Connecting CF proxy \(cfDomain)")
-                    let ws = try await RawWebSocket.connect(
-                        ip: cfDomain,
-                        domain: cfDomain,
-                        timeout: fallbackRelayTimeout
-                    )
-                    return .webSocket(ws)
-                } catch is CancellationError {
-                    throw CancellationError()
-                } catch {
-                    logger.append(.warning, "CF proxy failed for DC\(handshake.dcID)\(mediaTag): \(error.localizedDescription)")
-                }
-            case .tcp:
-                guard let fallbackIP = Self.defaultTargetIPs[handshake.dcID] else { continue }
-                do {
-                    logger.append(.info, "Connecting TCP fallback \(fallbackIP):443")
-                    let tcp = try await RawTCPRelay.connect(
-                        ip: fallbackIP,
-                        timeout: fallbackRelayTimeout
-                    )
-                    return .tcp(tcp)
-                } catch is CancellationError {
-                    throw CancellationError()
-                } catch {
-                    logger.append(.warning, "TCP fallback failed for DC\(handshake.dcID)\(mediaTag): \(error.localizedDescription)")
-                }
-            }
-        }
-
-        throw RawWebSocket.WebSocketError.invalidHandshake("All Telegram relay endpoints failed for DC\(handshake.dcID)")
+        return try await raceRelayCandidates(
+            handshake: handshake,
+            settings: settings,
+            logger: logger
+        )
     }
 
     private enum FallbackKind {
@@ -139,19 +100,96 @@ final class TelegramWebSocketConnector {
         return ["kws\(dcID).web.telegram.org", "kws\(dcID)-1.web.telegram.org"]
     }
 
+    private func raceRelayCandidates(
+        handshake: MTProtoHandshake,
+        settings: ProxySettings,
+        logger: ProxyLogStore
+    ) async throws -> TelegramRelayConnection {
+        let mediaTag = handshake.isMedia ? "m" : ""
+        let domains = wsDomains(for: handshake.dcID, isMedia: handshake.isMedia)
+        let targetIP = directTargetIP(for: handshake.dcID, settings: settings)
+        let fallbackIP = Self.defaultTargetIPs[handshake.dcID]
+
+        return try await withThrowingTaskGroup(of: TelegramRelayConnection?.self) { group in
+            if let targetIP {
+                group.addTask { [directWebSocketTimeout] in
+                    try await self.connectDirectWebSocket(
+                        targetIP: targetIP,
+                        domains: domains,
+                        timeout: directWebSocketTimeout,
+                        logger: logger
+                    ).map { .webSocket($0) }
+                }
+            }
+
+            if settings.cfProxyEnabled {
+                let cfDomain = "kws\(handshake.dcID).\(settings.cfProxyDomain)"
+                group.addTask { [fallbackRelayTimeout] in
+                    logger.append(.info, "Connecting CF proxy \(cfDomain)")
+                    do {
+                        let ws = try await RawWebSocket.connect(
+                            ip: cfDomain,
+                            domain: cfDomain,
+                            timeout: fallbackRelayTimeout
+                        )
+                        return .webSocket(ws)
+                    } catch is CancellationError {
+                        throw CancellationError()
+                    } catch {
+                        logger.append(.warning, "CF proxy failed for DC\(handshake.dcID)\(mediaTag): \(error.localizedDescription)")
+                        return nil
+                    }
+                }
+            }
+
+            if let fallbackIP {
+                group.addTask { [fallbackRelayTimeout] in
+                    logger.append(.info, "Connecting TCP fallback \(fallbackIP):443")
+                    do {
+                        let tcp = try await RawTCPRelay.connect(
+                            ip: fallbackIP,
+                            timeout: fallbackRelayTimeout
+                        )
+                        return .tcp(tcp)
+                    } catch is CancellationError {
+                        throw CancellationError()
+                    } catch {
+                        logger.append(.warning, "TCP fallback failed for DC\(handshake.dcID)\(mediaTag): \(error.localizedDescription)")
+                        return nil
+                    }
+                }
+            }
+
+            var sawCandidate = false
+            while let candidate = try await group.next() {
+                sawCandidate = true
+                if let candidate {
+                    group.cancelAll()
+                    return candidate
+                }
+            }
+
+            if !sawCandidate {
+                throw RawWebSocket.WebSocketError.invalidHandshake("No relay candidates configured for DC\(handshake.dcID)")
+            }
+            throw RawWebSocket.WebSocketError.invalidHandshake("All Telegram relay endpoints failed for DC\(handshake.dcID)")
+        }
+    }
+
     private func connectDirectWebSocket(
         targetIP: String,
         domains: [String],
+        timeout: TimeInterval,
         logger: ProxyLogStore
     ) async throws -> RawWebSocket? {
         try await withThrowingTaskGroup(of: (String, Result<RawWebSocket, Error>).self) { group in
             for domain in domains {
-                group.addTask { [directWebSocketTimeout] in
+                group.addTask {
                     do {
                         let ws = try await RawWebSocket.connect(
                             ip: targetIP,
                             domain: domain,
-                            timeout: directWebSocketTimeout
+                            timeout: timeout
                         )
                         return (domain, .success(ws))
                     } catch {
