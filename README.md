@@ -26,6 +26,7 @@ Native iOS app shell for a local Telegram MTProto proxy.
 The repository is designed to be built on GitHub Actions without a local Xcode install.
 
 CI uses XcodeGen to generate the Xcode project and then runs a single reproducible shell script on a macOS runner.
+The release workflow targets a macOS 15 runner with Xcode 16, which is required for the generated project format.
 
 Tag pushes like `v0.2.0` produce versioned artifacts such as `WSProxy-0.2.0+42.ipa`.
 Non-tag builds keep a dev-style version string.
