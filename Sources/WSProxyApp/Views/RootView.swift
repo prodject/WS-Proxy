@@ -126,7 +126,7 @@ struct RootView: View {
                         presentedUpdate = update
                     }
                 }
-                .onChange(of: appState.availableUpdate?.id) { _, _ in
+                .onChange(of: appState.availableUpdate?.id) { _ in
                     presentedUpdate = appState.availableUpdate
                 }
             }
