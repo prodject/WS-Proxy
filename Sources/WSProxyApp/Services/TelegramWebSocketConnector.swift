@@ -9,9 +9,10 @@ final class TelegramWebSocketConnector {
     private let pool = TelegramWebSocketPool()
     private let routeState = TelegramRelayRouteState()
     private let concurrencyLimiter = TelegramRelayConcurrencyLimiter(defaultLimit: 4)
-    private let directWebSocketTimeout: TimeInterval = 2.5
+    private let directWebSocketNormalTimeout: TimeInterval = 10.0
+    private let directWebSocketRetryTimeout: TimeInterval = 2.0
     private let fallbackRelayTimeout: TimeInterval = 4.0
-    private let directWSCooldown: TimeInterval = 300
+    private let directWSCooldown: TimeInterval = 30.0
 
     func connect(
         for handshake: MTProtoHandshake,
@@ -22,9 +23,9 @@ final class TelegramWebSocketConnector {
         let domains = wsDomains(for: handshake.dcID, isMedia: handshake.isMedia)
         let targetIP = directTargetIP(for: handshake.dcID, settings: settings)
         let routeKey = "dc\(handshake.dcID)\(handshake.isMedia ? "m" : "")"
-        let directWSAllowed = await routeState.isDirectWSAllowed(for: routeKey)
+        let directWSBlacklisted = await routeState.isDirectWSBlacklisted(for: routeKey)
 
-        if let targetIP, directWSAllowed {
+        if let targetIP, !directWSBlacklisted {
             let poolKey = "dc\(handshake.dcID)\(handshake.isMedia ? "m" : "")@\(targetIP)"
             if let pooled = await pool.checkout(
                 key: poolKey,
@@ -36,15 +37,16 @@ final class TelegramWebSocketConnector {
                 logger.append(.info, "Using pooled WS for DC\(handshake.dcID)\(mediaTag) via \(targetIP)")
                 return .webSocket(pooled)
             }
-        } else if !directWSAllowed {
-            logger.append(.debug, "Skipping direct WS for \(routeKey) due to cooldown")
+        } else if directWSBlacklisted {
+            logger.append(.debug, "Skipping direct WS for \(routeKey) due to blacklist")
         }
 
         return try await raceRelayCandidates(
             handshake: handshake,
             settings: settings,
             logger: logger,
-            allowDirectWS: directWSAllowed
+            targetIP: targetIP,
+            directWSBlacklisted: directWSBlacklisted
         )
     }
 
@@ -69,7 +71,7 @@ final class TelegramWebSocketConnector {
                 let poolKey = "dc\(dcID)\(isMedia ? "m" : "")@\(targetIP)"
                 let routeKey = "dc\(dcID)\(isMedia ? "m" : "")"
                 Task {
-                    guard await self.routeState.isDirectWSAllowed(for: routeKey) else { return }
+                    guard !(await self.routeState.isDirectWSBlacklisted(for: routeKey)) else { return }
                     await pool.warm(
                         key: poolKey,
                         targetIP: targetIP,
@@ -92,7 +94,7 @@ final class TelegramWebSocketConnector {
                 return mapping.ip
             }
         }
-        return Self.defaultTargetIPs[dcID]
+        return nil
     }
 
     private func targetDCIDs(from settings: ProxySettings) -> [Int] {
@@ -114,23 +116,43 @@ final class TelegramWebSocketConnector {
         handshake: MTProtoHandshake,
         settings: ProxySettings,
         logger: ProxyLogStore,
-        allowDirectWS: Bool
+        targetIP: String?,
+        directWSBlacklisted: Bool
     ) async throws -> TelegramRelayConnection {
         let mediaTag = handshake.isMedia ? "m" : ""
         let domains = wsDomains(for: handshake.dcID, isMedia: handshake.isMedia)
-        let targetIP = directTargetIP(for: handshake.dcID, settings: settings)
         let fallbackIP = Self.defaultTargetIPs[handshake.dcID]
         let routeKey = "dc\(handshake.dcID)\(handshake.isMedia ? "m" : "")"
+        let directTimeout = await routeState.directWSTimeout(
+            for: routeKey,
+            normalTimeout: directWebSocketNormalTimeout,
+            degradedTimeout: directWebSocketRetryTimeout
+        )
 
-        return try await withThrowingTaskGroup(of: TelegramRelayConnection?.self) { group in
-            if let targetIP, allowDirectWS {
-                group.addTask { [directWebSocketTimeout] in
-                    try await self.connectDirectWebSocket(
-                        targetIP: targetIP,
-                        domains: domains,
-                        timeout: directWebSocketTimeout,
-                        logger: logger
-                    ).map { .webSocket($0) }
+        enum RelayAttempt {
+            case connection(TelegramRelayConnection)
+            case directRedirectOnly
+            case none
+        }
+
+        return try await withThrowingTaskGroup(of: RelayAttempt.self) { group in
+            if let targetIP, !directWSBlacklisted {
+                group.addTask {
+                    do {
+                        if let socket = try await self.connectDirectWebSocket(
+                            targetIP: targetIP,
+                            domains: domains,
+                            timeout: directTimeout,
+                            logger: logger
+                        ) {
+                            return .connection(.webSocket(socket))
+                        }
+                        return .none
+                    } catch DirectWebSocketConnectError.redirectOnly {
+                        return .directRedirectOnly
+                    } catch {
+                        return .none
+                    }
                 }
             }
 
@@ -144,12 +166,12 @@ final class TelegramWebSocketConnector {
                             domain: cfDomain,
                             timeout: fallbackRelayTimeout
                         )
-                        return .webSocket(ws)
+                        return .connection(.webSocket(ws))
                     } catch is CancellationError {
                         throw CancellationError()
                     } catch {
                         logger.append(.warning, "CF proxy failed for DC\(handshake.dcID)\(mediaTag): \(error.localizedDescription)")
-                        return nil
+                        return .none
                     }
                 }
             }
@@ -166,40 +188,54 @@ final class TelegramWebSocketConnector {
                             ip: fallbackIP,
                             timeout: fallbackRelayTimeout
                         )
-                        return .tcp(tcp, permit)
+                        return .connection(.tcp(tcp, permit))
                     } catch is CancellationError {
                         await permit.release()
                         throw CancellationError()
                     } catch {
                         await permit.release()
                         logger.append(.warning, "TCP fallback failed for DC\(handshake.dcID)\(mediaTag): \(error.localizedDescription)")
-                        return nil
+                        return .none
                     }
                 }
             }
 
             var sawCandidate = false
-            while let candidate = try await group.next() {
+            var sawDirectRedirectOnly = false
+            while let attempt = try await group.next() {
                 sawCandidate = true
-                if let candidate {
+                switch attempt {
+                case .connection(let candidate):
                     if case .webSocket = candidate {
-                        await routeState.clearDirectWSCooldown(for: routeKey)
+                        await routeState.clearDirectWSFailure(for: routeKey)
                     } else {
-                        await routeState.setDirectWSCooldown(for: routeKey, duration: directWSCooldown)
+                        await routeState.markDirectWSFailure(for: routeKey, duration: directWSCooldown)
                     }
                     group.cancelAll()
                     return candidate
+                case .directRedirectOnly:
+                    sawDirectRedirectOnly = true
+                case .none:
+                    continue
                 }
             }
 
             if !sawCandidate {
                 throw RawWebSocket.WebSocketError.invalidHandshake("No relay candidates configured for DC\(handshake.dcID)")
             }
-            if allowDirectWS {
-                await routeState.setDirectWSCooldown(for: routeKey, duration: directWSCooldown)
+            if targetIP != nil, !directWSBlacklisted {
+                if sawDirectRedirectOnly {
+                    await routeState.blacklistDirectWS(for: routeKey)
+                } else {
+                    await routeState.markDirectWSFailure(for: routeKey, duration: directWSCooldown)
+                }
             }
             throw RawWebSocket.WebSocketError.invalidHandshake("All Telegram relay endpoints failed for DC\(handshake.dcID)")
         }
+    }
+
+    private enum DirectWebSocketConnectError: Error {
+        case redirectOnly
     }
 
     private func connectDirectWebSocket(
@@ -226,6 +262,8 @@ final class TelegramWebSocketConnector {
             }
 
             var firstError: Error?
+            var sawRedirect = false
+            var sawNonRedirectFailure = false
             while let (domain, result) = try await group.next() {
                 switch result {
                 case .success(let ws):
@@ -236,14 +274,17 @@ final class TelegramWebSocketConnector {
                     throw error
                 case .failure(let error as RawWebSocket.WebSocketError):
                     if case .invalidHandshake(let response) = error, Self.isRedirect(response) {
+                        sawRedirect = true
                         logger.append(.warning, "WS redirect for \(domain): \(Self.firstStatusLine(response))")
                     } else {
+                        sawNonRedirectFailure = true
                         logger.append(.warning, "WS connect failed for \(domain): \(error.localizedDescription)")
                     }
                     if firstError == nil {
                         firstError = error
                     }
                 case .failure(let error):
+                    sawNonRedirectFailure = true
                     logger.append(.warning, "WS connect failed for \(domain): \(error.localizedDescription)")
                     if firstError == nil {
                         firstError = error
@@ -251,6 +292,9 @@ final class TelegramWebSocketConnector {
                 }
             }
 
+            if sawRedirect, !sawNonRedirectFailure {
+                throw DirectWebSocketConnectError.redirectOnly
+            }
             if let firstError {
                 throw firstError
             }

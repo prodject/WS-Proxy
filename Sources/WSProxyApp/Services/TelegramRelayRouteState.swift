@@ -1,22 +1,35 @@
 import Foundation
 
 actor TelegramRelayRouteState {
-    private var directWSCooldownUntil: [String: Date] = [:]
+    private var directWSFailUntil: [String: Date] = [:]
+    private var directWSBlacklist: Set<String> = []
 
-    func isDirectWSAllowed(for key: String) -> Bool {
-        guard let until = directWSCooldownUntil[key] else { return true }
+    func isDirectWSBlacklisted(for key: String) -> Bool {
+        directWSBlacklist.contains(key)
+    }
+
+    func directWSTimeout(
+        for key: String,
+        normalTimeout: TimeInterval,
+        degradedTimeout: TimeInterval
+    ) -> TimeInterval {
+        guard let until = directWSFailUntil[key] else { return normalTimeout }
         if until <= Date() {
-            directWSCooldownUntil[key] = nil
-            return true
+            directWSFailUntil[key] = nil
+            return normalTimeout
         }
-        return false
+        return degradedTimeout
     }
 
-    func setDirectWSCooldown(for key: String, duration: TimeInterval) {
-        directWSCooldownUntil[key] = Date().addingTimeInterval(duration)
+    func markDirectWSFailure(for key: String, duration: TimeInterval) {
+        directWSFailUntil[key] = Date().addingTimeInterval(duration)
     }
 
-    func clearDirectWSCooldown(for key: String) {
-        directWSCooldownUntil[key] = nil
+    func clearDirectWSFailure(for key: String) {
+        directWSFailUntil[key] = nil
+    }
+
+    func blacklistDirectWS(for key: String) {
+        directWSBlacklist.insert(key)
     }
 }
