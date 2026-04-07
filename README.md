@@ -27,7 +27,8 @@ The repository is designed to be built on GitHub Actions without a local Xcode i
 
 CI uses XcodeGen to generate the Xcode project and then runs a single reproducible shell script on a macOS runner.
 
-The current workflow packages an `.ipa` artifact from the built app bundle.
+Tag pushes like `v0.2.0` produce versioned artifacts such as `WSProxy-0.2.0+42.ipa`.
+Non-tag builds keep a dev-style version string.
 
 ## Notes
 

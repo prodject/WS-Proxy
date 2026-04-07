@@ -8,8 +8,10 @@ SCHEME="${SCHEME:-WSProxy}"
 CONFIGURATION="${CONFIGURATION:-Release}"
 BUILD_DIR="${BUILD_DIR:-${ROOT_DIR}/build}"
 ARCHIVE_PATH="${ARCHIVE_PATH:-${BUILD_DIR}/WSProxy.xcarchive}"
-IPA_NAME="${IPA_NAME:-WSProxy.ipa}"
 APP_NAME="${APP_NAME:-WSProxy.app}"
+APP_VERSION="${APP_VERSION:-0.1.0}"
+BUILD_NUMBER="${BUILD_NUMBER:-1}"
+IPA_NAME="${IPA_NAME:-WSProxy-${APP_VERSION}+${BUILD_NUMBER}.ipa}"
 
 if ! command -v xcodegen >/dev/null 2>&1; then
     echo "xcodegen is required but not installed" >&2
@@ -27,6 +29,8 @@ xcodebuild \
     -configuration "${CONFIGURATION}" \
     -destination "generic/platform=iOS" \
     -archivePath "${ARCHIVE_PATH}" \
+    MARKETING_VERSION="${APP_VERSION}" \
+    CURRENT_PROJECT_VERSION="${BUILD_NUMBER}" \
     CODE_SIGNING_ALLOWED=NO \
     CODE_SIGNING_REQUIRED=NO \
     CODE_SIGN_IDENTITY="" \
