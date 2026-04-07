@@ -27,6 +27,11 @@ final class AppState: ObservableObject {
         self.updateChecker = updateChecker
         self.settings = settingsStore.load()
         self.logStore.seedWithPlaceholder()
+        if self.settings.checkUpdates {
+            Task { [weak self] in
+                await self?.checkForUpdatesIfNeeded()
+            }
+        }
     }
 
     func save() {
@@ -34,6 +39,11 @@ final class AppState: ObservableObject {
             try settingsStore.save(settings)
             lastMessage = "Settings saved"
             logStore.append(.info, "Settings saved")
+            if settings.checkUpdates, !didRunAutomaticUpdateCheck {
+                Task { [weak self] in
+                    await self?.checkForUpdatesIfNeeded()
+                }
+            }
         } catch {
             lastMessage = "Failed to save settings: \(error.localizedDescription)"
             logStore.append(.error, "Failed to save settings: \(error.localizedDescription)")
