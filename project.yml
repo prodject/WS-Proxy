@@ -1,0 +1,50 @@
+name: WS-Proxy
+
+options:
+  bundleIdPrefix: com.prodject
+  createIntermediateGroups: true
+  deploymentTarget:
+    iOS: 16.0
+
+settings:
+  base:
+    SWIFT_VERSION: 5.0
+    DEVELOPMENT_TEAM: ""
+    IPHONEOS_DEPLOYMENT_TARGET: 16.0
+    TARGETED_DEVICE_FAMILY: "1,2"
+
+targets:
+  WSProxy:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources/WSProxyApp
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.prodject.wsproxy
+        PRODUCT_NAME: WSProxy
+        MARKETING_VERSION: 0.1.0
+        CURRENT_PROJECT_VERSION: 1
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: WS Proxy
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UIRequiresFullScreen: YES
+    scheme:
+      testTargets:
+        - WSProxyTests
+
+  WSProxyTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: Tests/WSProxyAppTests
+    dependencies:
+      - target: WSProxy
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.prodject.wsproxy.tests
+        GENERATE_INFOPLIST_FILE: YES
+        IPHONEOS_DEPLOYMENT_TARGET: 16.0
+    scheme:
+      testTargets:
+        - WSProxyTests

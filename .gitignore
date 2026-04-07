@@ -60,3 +60,19 @@ fastlane/report.xml
 fastlane/Preview.html
 fastlane/screenshots/**/*.png
 fastlane/test_output
+
+## Example
+tg-ws-proxy-main/
+tg-ws-proxy-main/*
+
+## Xcode / iOS build outputs
+DerivedData/
+build/
+Payload/
+WS-Proxy.xcodeproj/
+*.xcuserstate
+*.xccheckout
+*.xcuserdata/
+*.xcodeproj/project.xcworkspace/
+*.xcodeproj/xcuserdata/
+*.ipa
