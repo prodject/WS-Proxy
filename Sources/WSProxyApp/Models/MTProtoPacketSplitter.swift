@@ -2,48 +2,63 @@ import Foundation
 
 final class MTProtoPacketSplitter {
     private let transport: MTProtoTransport
-    private var plainBuffer = Data()
+    private let inspectorCipher: MTProtoStreamCipher
     private var cipherBuffer = Data()
+    private var plainBuffer = Data()
     private var isDisabled = false
+    private let lock = NSLock()
 
-    init(transport: MTProtoTransport) {
+    init(inspectorCipher: MTProtoStreamCipher, transport: MTProtoTransport) {
+        self.inspectorCipher = inspectorCipher
         self.transport = transport
+        try? self.inspectorCipher.transform(Data(repeating: 0, count: 64))
     }
 
     func split(_ chunk: Data) -> [Data] {
         guard !chunk.isEmpty else { return [] }
-        if isDisabled {
-            return [chunk]
-        }
-
-        cipherBuffer.append(chunk)
-        plainBuffer.append(chunk)
-
-        var packets: [Data] = []
-        while !cipherBuffer.isEmpty {
-            guard let length = nextPacketLength() else { break }
-            if length <= 0 {
-                packets.append(cipherBuffer)
-                cipherBuffer.removeAll(keepingCapacity: true)
-                plainBuffer.removeAll(keepingCapacity: true)
-                isDisabled = true
-                break
+        return lock.withLock {
+            if isDisabled {
+                return [chunk]
             }
 
-            guard cipherBuffer.count >= length else { break }
-            packets.append(cipherBuffer.prefix(length))
-            cipherBuffer.removeFirst(length)
-            plainBuffer.removeFirst(length)
+            cipherBuffer.append(chunk)
+            guard let plain = try? inspectorCipher.transform(chunk) else {
+                isDisabled = true
+                let tail = cipherBuffer
+                cipherBuffer.removeAll(keepingCapacity: true)
+                plainBuffer.removeAll(keepingCapacity: true)
+                return [tail]
+            }
+            plainBuffer.append(plain)
+
+            var packets: [Data] = []
+            while !cipherBuffer.isEmpty {
+                guard let length = nextPacketLength() else { break }
+                if length <= 0 {
+                    packets.append(cipherBuffer)
+                    cipherBuffer.removeAll(keepingCapacity: true)
+                    plainBuffer.removeAll(keepingCapacity: true)
+                    isDisabled = true
+                    break
+                }
+
+                guard cipherBuffer.count >= length else { break }
+                packets.append(cipherBuffer.prefix(length))
+                cipherBuffer.removeFirst(length)
+                plainBuffer.removeFirst(length)
+            }
+            return packets
         }
-        return packets
     }
 
     func flush() -> [Data] {
-        guard !cipherBuffer.isEmpty else { return [] }
-        let tail = cipherBuffer
-        cipherBuffer.removeAll(keepingCapacity: true)
-        plainBuffer.removeAll(keepingCapacity: true)
-        return [tail]
+        lock.withLock {
+            guard !cipherBuffer.isEmpty else { return [] }
+            let tail = cipherBuffer
+            cipherBuffer.removeAll(keepingCapacity: true)
+            plainBuffer.removeAll(keepingCapacity: true)
+            return [tail]
+        }
     }
 
     private func nextPacketLength() -> Int? {

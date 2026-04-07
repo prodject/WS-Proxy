@@ -9,6 +9,8 @@ Native iOS app shell for a local Telegram MTProto proxy.
 - `tg://proxy` link generation
 - local proxy listener scaffold on `Network.framework`
 - in-app log viewer
+- MTProto handshake parsing and bridge scaffolding
+- outbound WebSocket client and packet splitter layers
 - CI workflow that builds and publishes an `.ipa` artifact
 
 ## Project layout

@@ -9,11 +9,13 @@ final class ProxyConnectionSession {
     private let connector: TelegramWebSocketConnector
     private let onClose: (UUID) -> Void
     private var isActive = false
+    private let bufferLock = NSLock()
     private var receiveBuffer = Data()
     private var parsedHandshake: MTProtoHandshake?
-    private var packetSplitter: MTProtoPacketSplitter?
+    private var bridgeContext: MTProtoBridgeContext?
     private var webSocket: RawWebSocket?
     private var bridgeTask: Task<Void, Never>?
+    private var wsPumpTask: Task<Void, Never>?
 
     init(
         connection: NWConnection,
@@ -53,6 +55,8 @@ final class ProxyConnectionSession {
     func stop() {
         bridgeTask?.cancel()
         bridgeTask = nil
+        wsPumpTask?.cancel()
+        wsPumpTask = nil
         Task { [webSocket] in
             await webSocket?.close()
         }
@@ -76,6 +80,18 @@ final class ProxyConnectionSession {
             }
             if isComplete {
                 self.logger.append(.info, "Client closed connection")
+                if self.bridgeContext != nil, self.webSocket != nil {
+                    Task { [weak self] in
+                        guard let self, let ws = self.webSocket else { return }
+                        do {
+                            try await self.flushClientTail(to: ws)
+                        } catch {
+                            self.logger.append(.warning, "Failed to flush client tail: \(error.localizedDescription)")
+                        }
+                        self.finish()
+                    }
+                    return
+                }
                 self.finish()
                 return
             }
@@ -84,25 +100,33 @@ final class ProxyConnectionSession {
     }
 
     private func handleIncoming(_ data: Data) {
-        receiveBuffer.append(data)
+        appendToReceiveBuffer(data)
         logger.append(.debug, "Received \(data.count) bytes")
 
         guard parsedHandshake == nil else { return }
-        guard receiveBuffer.count >= MTProtoHandshakeParser.handshakeLength else { return }
+        guard receiveBufferCount() >= MTProtoHandshakeParser.handshakeLength else { return }
 
-        let handshakeData = receiveBuffer.prefix(MTProtoHandshakeParser.handshakeLength)
+        let handshakeData = takeHandshakeBytes()
         guard let handshake = MTProtoHandshakeParser.parse(Data(handshakeData)) else {
             logger.append(.warning, "Received non-MTProto handshake payload")
             return
         }
 
         parsedHandshake = handshake
-        packetSplitter = MTProtoPacketSplitter(transport: handshake.transport)
         logger.append(
             .info,
             "Handshake parsed: DC\(handshake.dcID)\(handshake.isMedia ? "m" : "") \(handshake.transport.label)"
         )
-        startWebSocketBridge(handshake)
+        do {
+            bridgeContext = try MTProtoBridgeContext(
+                handshake: handshake,
+                secretHex: settings.secret
+            )
+            startWebSocketBridge(handshake)
+        } catch {
+            logger.append(.error, "Bridge context failed: \(error.localizedDescription)")
+            finish()
+        }
     }
 
     private func startWebSocketBridge(_ handshake: MTProtoHandshake) {
@@ -117,16 +141,12 @@ final class ProxyConnectionSession {
                 )
                 self.webSocket = ws
                 self.logger.append(.info, "WebSocket bridge ready for DC\(handshake.dcID)")
-                if !self.receiveBuffer.isEmpty {
-                    let buffered = self.receiveBuffer
-                    self.receiveBuffer.removeAll(keepingCapacity: true)
-                    let packets = self.packetSplitter?.split(buffered) ?? [buffered]
-                    for packet in packets {
-                        try await ws.send(packet)
-                        self.logger.append(.debug, "Forwarded \(packet.count) bytes to WS")
-                    }
+                guard let bridgeContext else {
+                    throw MTProtoCryptoError.cryptorCreationFailed
                 }
-                await self.pumpClientToWebSocket(ws)
+                try await ws.send(bridgeContext.relayInit)
+                self.startWebSocketReceivePump(ws)
+                try await self.flushPendingClientBytes(to: ws)
             } catch {
                 self.logger.append(.error, "WebSocket bridge failed: \(error.localizedDescription)")
                 self.finish()
@@ -134,24 +154,96 @@ final class ProxyConnectionSession {
         }
     }
 
-    private func pumpClientToWebSocket(_ ws: RawWebSocket) async {
+    private func startWebSocketReceivePump(_ ws: RawWebSocket) {
+        guard wsPumpTask == nil else { return }
+        wsPumpTask = Task { [weak self] in
+            guard let self else { return }
+            await self.pumpWebSocketToClient(ws)
+        }
+    }
+
+    private func pumpWebSocketToClient(_ ws: RawWebSocket) async {
         while isActive {
-            try? await Task.sleep(nanoseconds: 250_000_000)
-            if !receiveBuffer.isEmpty {
-                let chunk = receiveBuffer
-                receiveBuffer.removeAll(keepingCapacity: true)
-                do {
-                    let packets = packetSplitter?.split(chunk) ?? [chunk]
-                    for packet in packets {
-                        try await ws.send(packet)
-                        logger.append(.debug, "Forwarded \(packet.count) bytes to WS")
-                    }
-                } catch {
-                    logger.append(.error, "WS send failed: \(error.localizedDescription)")
-                    finish()
-                    return
-                }
+            do {
+                guard let data = try await ws.recv() else { break }
+                guard let bridgeContext else { continue }
+                let plain = try bridgeContext.decodeRelayChunk(data)
+                try await writeToClient(plain)
+                logger.append(.debug, "Forwarded \(plain.count) bytes to client")
+            } catch {
+                logger.append(.error, "WS receive failed: \(error.localizedDescription)")
+                finish()
+                return
             }
+        }
+        finish()
+    }
+
+    private func flushPendingClientBytes(to ws: RawWebSocket) async throws {
+        while let chunk = takePendingClientChunk() {
+            guard let bridgeContext else { break }
+            let packets = try bridgeContext.encodeClientChunk(chunk)
+            if packets.isEmpty {
+                continue
+            }
+            if packets.count == 1 {
+                try await ws.send(packets[0])
+            } else {
+                try await ws.sendBatch(packets)
+            }
+            logger.append(.debug, "Forwarded \(chunk.count) bytes to WS")
+        }
+    }
+
+    private func flushClientTail(to ws: RawWebSocket) async throws {
+        guard let bridgeContext else { return }
+        let tailPackets = try bridgeContext.flushClientTail()
+        if tailPackets.isEmpty {
+            return
+        }
+        if tailPackets.count == 1 {
+            try await ws.send(tailPackets[0])
+        } else {
+            try await ws.sendBatch(tailPackets)
+        }
+    }
+
+    private func writeToClient(_ data: Data) async throws {
+        try await withCheckedThrowingContinuation { continuation in
+            connection.send(content: data, completion: .contentProcessed { error in
+                if let error {
+                    continuation.resume(throwing: error)
+                } else {
+                    continuation.resume()
+                }
+            })
+        }
+    }
+
+    private func appendToReceiveBuffer(_ data: Data) {
+        bufferLock.withLock {
+            receiveBuffer.append(data)
+        }
+    }
+
+    private func receiveBufferCount() -> Int {
+        bufferLock.withLock { receiveBuffer.count }
+    }
+
+    private func takeHandshakeBytes() -> Data {
+        bufferLock.withLock {
+            let handshake = receiveBuffer.prefix(MTProtoHandshakeParser.handshakeLength)
+            receiveBuffer.removeFirst(min(receiveBuffer.count, MTProtoHandshakeParser.handshakeLength))
+            return Data(handshake)
+        }
+    }
+
+    private func takePendingClientChunk() -> Data? {
+        bufferLock.withLock {
+            guard !receiveBuffer.isEmpty else { return nil }
+            let chunk = receiveBuffer
+            receiveBuffer.removeAll(keepingCapacity: true)
+            return chunk
         }
     }
 
@@ -160,6 +252,8 @@ final class ProxyConnectionSession {
         isActive = false
         bridgeTask?.cancel()
         bridgeTask = nil
+        wsPumpTask?.cancel()
+        wsPumpTask = nil
         Task { [webSocket] in
             await webSocket?.close()
         }

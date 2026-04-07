@@ -16,6 +16,11 @@ enum MTProtoTransport: Int, CaseIterable, Codable {
         }
     }
 
+    var tagData: Data {
+        var value = UInt32(self.rawValue).bigEndian
+        return Data(bytes: &value, count: MemoryLayout<UInt32>.size)
+    }
+
     init?(tagBytes: Data) {
         guard tagBytes.count >= 4 else { return nil }
         let value = tagBytes.prefix(4).reduce(UInt32(0)) { partial, byte in
