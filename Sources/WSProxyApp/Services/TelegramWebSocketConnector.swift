@@ -6,6 +6,8 @@ enum TelegramRelayConnection {
 }
 
 final class TelegramWebSocketConnector {
+    private let pool = TelegramWebSocketPool()
+
     func connect(
         for handshake: MTProtoHandshake,
         settings: ProxySettings,
@@ -16,6 +18,18 @@ final class TelegramWebSocketConnector {
         let mediaTag = handshake.isMedia ? "m" : ""
 
         for targetIP in targetIPs {
+            let poolKey = "dc\(handshake.dcID)\(handshake.isMedia ? "m" : "")@\(targetIP)"
+            if let pooled = await pool.checkout(
+                key: poolKey,
+                targetIP: targetIP,
+                domains: domains,
+                desiredSize: settings.poolSize,
+                logger: logger
+            ) {
+                logger.append(.info, "Using pooled WS for DC\(handshake.dcID)\(mediaTag) via \(targetIP)")
+                return .webSocket(pooled)
+            }
+
             for domain in domains {
                 do {
                     logger.append(.info, "Connecting WS \(domain) -> \(targetIP)")
@@ -28,7 +42,7 @@ final class TelegramWebSocketConnector {
                     }
                     logger.append(.warning, "WS handshake failed for \(domain): \(Self.firstStatusLine(response))")
                 } catch is CancellationError {
-                    logger.append(.warning, "WS connect cancelled for \(domain)")
+                    throw CancellationError()
                 } catch {
                     logger.append(.warning, "WS connect failed for \(domain): \(error.localizedDescription)")
                 }
@@ -44,6 +58,8 @@ final class TelegramWebSocketConnector {
                     logger.append(.info, "Connecting CF proxy \(cfDomain)")
                     let ws = try await RawWebSocket.connect(ip: cfDomain, domain: cfDomain)
                     return .webSocket(ws)
+                } catch is CancellationError {
+                    throw CancellationError()
                 } catch {
                     logger.append(.warning, "CF proxy failed for DC\(handshake.dcID)\(mediaTag): \(error.localizedDescription)")
                 }
@@ -53,6 +69,8 @@ final class TelegramWebSocketConnector {
                     logger.append(.info, "Connecting TCP fallback \(fallbackIP):443")
                     let tcp = try await RawTCPRelay.connect(ip: fallbackIP)
                     return .tcp(tcp)
+                } catch is CancellationError {
+                    throw CancellationError()
                 } catch {
                     logger.append(.warning, "TCP fallback failed for DC\(handshake.dcID)\(mediaTag): \(error.localizedDescription)")
                 }
@@ -74,6 +92,32 @@ final class TelegramWebSocketConnector {
         return [.tcp]
     }
 
+    func warmup(settings: ProxySettings, logger: ProxyLogStore) {
+        guard settings.poolSize > 0 else { return }
+        for dcID in Set(targetDCIDs(from: settings)) {
+            let targetIPs = targetIPs(for: dcID, settings: settings)
+            for targetIP in targetIPs {
+                for isMedia in [false, true] {
+                    let domains = wsDomains(for: dcID, isMedia: isMedia)
+                    let poolKey = "dc\(dcID)\(isMedia ? "m" : "")@\(targetIP)"
+                    Task {
+                        await pool.warm(
+                            key: poolKey,
+                            targetIP: targetIP,
+                            domains: domains,
+                            desiredSize: settings.poolSize,
+                            logger: logger
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    func shutdown() async {
+        await pool.shutdown()
+    }
+
     private func targetIPs(for dcID: Int, settings: ProxySettings) -> [String] {
         var candidates: [String] = []
         for entry in settings.dcIP {
@@ -92,6 +136,14 @@ final class TelegramWebSocketConnector {
         }
 
         return candidates
+    }
+
+    private func targetDCIDs(from settings: ProxySettings) -> [Int] {
+        var ids = settings.dcIP.compactMap { entry in
+            try? DCMapping.parse(entry).dc
+        }
+        ids.append(contentsOf: Self.defaultTargetIPs.keys)
+        return ids
     }
 
     private func wsDomains(for dcID: Int, isMedia: Bool) -> [String] {

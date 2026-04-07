@@ -162,6 +162,9 @@ final class ProxyConnectionSession: @unchecked Sendable {
                     self.startTCPReceivePump(tcp)
                     try await self.flushPendingClientBytes(to: tcp)
                 }
+            } catch is CancellationError {
+                self.logger.append(.debug, "Relay connect cancelled for DC\(handshake.dcID)")
+                self.finish()
             } catch {
                 self.logger.append(.error, "Relay bridge failed: \(error.localizedDescription)")
                 self.finish()

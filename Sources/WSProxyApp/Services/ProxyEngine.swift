@@ -63,6 +63,7 @@ final class LocalProxyEngine: ProxyEngine, @unchecked Sendable {
         }
         self.listener = listener
         listener.start(queue: queue)
+        connector.warmup(settings: settings, logger: logger)
         logger.append(.info, "Proxy engine started on \(settings.host):\(settings.port)")
         logger.append(.debug, "Buffer: \(settings.bufferKB) KB, pool: \(settings.poolSize)")
         logger.append(.debug, "CF fallback: \(settings.cfProxyEnabled ? "enabled" : "disabled")")
@@ -71,6 +72,7 @@ final class LocalProxyEngine: ProxyEngine, @unchecked Sendable {
     func stop(logger: ProxyLogStore) async throws {
         listener?.cancel()
         listener = nil
+        await connector.shutdown()
         queue.sync {
             sessions.values.forEach { $0.stop() }
             sessions.removeAll()
