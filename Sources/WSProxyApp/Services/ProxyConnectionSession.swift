@@ -15,6 +15,7 @@ final class ProxyConnectionSession: @unchecked Sendable {
     private var bridgeContext: MTProtoBridgeContext?
     private var webSocket: RawWebSocket?
     private var tcpRelay: RawTCPRelay?
+    private var tcpRelayPermit: TelegramRelayPermit?
     private var bridgeTask: Task<Void, Never>?
     private var relayPumpTask: Task<Void, Never>?
 
@@ -60,9 +61,10 @@ final class ProxyConnectionSession: @unchecked Sendable {
         bridgeTask = nil
         relayPumpTask?.cancel()
         relayPumpTask = nil
-        Task { [webSocket, tcpRelay] in
+        Task { [webSocket, tcpRelay, tcpRelayPermit] in
             await webSocket?.close()
             await tcpRelay?.close()
+            await tcpRelayPermit?.release()
         }
         connection.cancel()
         finish()
@@ -159,8 +161,9 @@ final class ProxyConnectionSession: @unchecked Sendable {
                     try await ws.send(bridgeContext.relayInit)
                     self.startWebSocketReceivePump(ws)
                     try await self.flushPendingClientBytes(to: ws)
-                case .tcp(let tcp):
+                case .tcp(let tcp, let permit):
                     self.tcpRelay = tcp
+                    self.tcpRelayPermit = permit
                     self.logger.append(.info, "TCP fallback bridge ready for DC\(handshake.dcID)")
                     try await tcp.send(bridgeContext.relayInit)
                     self.startTCPReceivePump(tcp)
@@ -315,9 +318,10 @@ final class ProxyConnectionSession: @unchecked Sendable {
         bridgeTask = nil
         relayPumpTask?.cancel()
         relayPumpTask = nil
-        Task { [webSocket, tcpRelay] in
+        Task { [webSocket, tcpRelay, tcpRelayPermit] in
             await webSocket?.close()
             await tcpRelay?.close()
+            await tcpRelayPermit?.release()
         }
         connection.cancel()
         onClose(id)
