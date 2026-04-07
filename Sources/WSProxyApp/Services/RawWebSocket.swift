@@ -39,6 +39,13 @@ final class RawWebSocket: @unchecked Sendable {
         let nwHost = NWEndpoint.Host(ip)
         let tlsOptions = NWProtocolTLS.Options()
         sec_protocol_options_set_tls_server_name(tlsOptions.securityProtocolOptions, domain)
+        sec_protocol_options_set_verify_block(
+            tlsOptions.securityProtocolOptions,
+            { _, _, complete in
+                complete(true)
+            },
+            .global(qos: .utility)
+        )
         let parameters = NWParameters(tls: tlsOptions)
         parameters.allowLocalEndpointReuse = true
 
@@ -56,7 +63,7 @@ final class RawWebSocket: @unchecked Sendable {
         Sec-WebSocket-Version: 13\r
         Sec-WebSocket-Protocol: binary\r
         Origin: https://web.telegram.org\r
-        User-Agent: Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148\r
+        User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36\r
         \r
         """
 
@@ -139,7 +146,7 @@ final class RawWebSocket: @unchecked Sendable {
         return (opcode, payload)
     }
 
-    private static func waitUntilReady(_ connection: NWConnection, timeout: TimeInterval) async throws {
+    static func waitUntilReady(_ connection: NWConnection, timeout: TimeInterval) async throws {
         let deadline = Date().addingTimeInterval(timeout)
         while true {
             switch connection.state {
@@ -158,7 +165,7 @@ final class RawWebSocket: @unchecked Sendable {
         }
     }
 
-    private static func sendData(connection: NWConnection, data: Data) async throws {
+    static func sendData(connection: NWConnection, data: Data) async throws {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             connection.send(content: data, completion: .contentProcessed { error in
                 if let error {

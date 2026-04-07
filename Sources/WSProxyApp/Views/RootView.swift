@@ -3,6 +3,7 @@ import UIKit
 
 struct RootView: View {
     @EnvironmentObject private var appState: AppState
+    @Environment(\.openURL) private var openURL
     @State private var proxyLinkAlert = false
 
     var body: some View {
@@ -21,6 +22,9 @@ struct RootView: View {
                                 .font(.footnote)
                                 .foregroundStyle(.secondary)
                         }
+                        Text(updateStatusText)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
                     }
 
                     Section("Connection") {
@@ -87,6 +91,9 @@ struct RootView: View {
                         Button("Stop proxy") {
                             Task { await appState.stopProxy() }
                         }
+                        Button("Check updates") {
+                            Task { await appState.refreshUpdates(force: true) }
+                        }
                         Button("Copy tg://proxy link") {
                             if let url = appState.generatedProxyURL {
                                 UIPasteboard.general.string = url.absoluteString
@@ -101,6 +108,19 @@ struct RootView: View {
                     Button("OK", role: .cancel) { }
                 } message: {
                     Text(appState.generatedProxyURL?.absoluteString ?? "Unavailable")
+                }
+                .alert(item: $appState.availableUpdate) { update in
+                    Alert(
+                        title: Text("Update available"),
+                        message: Text("Installed: \(update.currentVersion)\nLatest: \(update.latestVersion)"),
+                        primaryButton: .default(Text("Download IPA")) {
+                            openURL(update.downloadURL ?? update.releasePageURL)
+                        },
+                        secondaryButton: .cancel()
+                    )
+                }
+                .task {
+                    await appState.checkForUpdatesIfNeeded()
                 }
             }
             .tabItem {
@@ -124,6 +144,21 @@ struct RootView: View {
             return "Running"
         case .failed(let error):
             return "Failed: \(error)"
+        }
+    }
+
+    private var updateStatusText: String {
+        switch appState.updateStatus {
+        case .idle:
+            return "Updates: idle"
+        case .checking:
+            return "Updates: checking"
+        case .upToDate(let version):
+            return "Updates: up to date (\(version))"
+        case .updateAvailable(let info):
+            return "Updates: \(info.latestVersion) available"
+        case .failed(let error):
+            return "Updates: \(error)"
         }
     }
 }

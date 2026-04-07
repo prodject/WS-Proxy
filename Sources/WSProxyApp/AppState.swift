@@ -6,19 +6,25 @@ final class AppState: ObservableObject {
     @Published var settings: ProxySettings
     @Published private(set) var engineStatus: ProxyEngineStatus = .stopped
     @Published private(set) var lastMessage: String?
+    @Published private(set) var updateStatus: AppUpdateStatus = .idle
+    @Published var availableUpdate: AppUpdateInfo?
     let logStore: ProxyLogStore
 
     private let settingsStore: SettingsStore
     private let engine: ProxyEngine
+    private let updateChecker: AppUpdateChecker
+    private var didRunAutomaticUpdateCheck = false
 
     init(
         settingsStore: SettingsStore,
         logStore: ProxyLogStore = ProxyLogStore(),
-        engine: ProxyEngine = LocalProxyEngine()
+        engine: ProxyEngine = LocalProxyEngine(),
+        updateChecker: AppUpdateChecker = AppUpdateChecker()
     ) {
         self.settingsStore = settingsStore
         self.logStore = logStore
         self.engine = engine
+        self.updateChecker = updateChecker
         self.settings = settingsStore.load()
         self.logStore.seedWithPlaceholder()
     }
@@ -72,5 +78,26 @@ final class AppState: ObservableObject {
 
     var generatedProxyURL: URL? {
         ProxyLinkBuilder.makeURL(from: settings)
+    }
+
+    func checkForUpdatesIfNeeded() async {
+        guard settings.checkUpdates, !didRunAutomaticUpdateCheck else { return }
+        didRunAutomaticUpdateCheck = true
+        await refreshUpdates(force: false)
+    }
+
+    func refreshUpdates(force: Bool) async {
+        updateStatus = .checking
+        let status = await updateChecker.checkForUpdates(
+            currentVersion: AppReleaseVersion.current(),
+            force: force
+        )
+        updateStatus = status
+        if case .updateAvailable(let info) = status {
+            availableUpdate = info
+            logStore.append(.info, "Update available: \(info.latestVersion)")
+        } else if case .failed(let message) = status {
+            logStore.append(.warning, "Update check failed: \(message)")
+        }
     }
 }

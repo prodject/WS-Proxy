@@ -14,8 +14,9 @@ final class ProxyConnectionSession: @unchecked Sendable {
     private var parsedHandshake: MTProtoHandshake?
     private var bridgeContext: MTProtoBridgeContext?
     private var webSocket: RawWebSocket?
+    private var tcpRelay: RawTCPRelay?
     private var bridgeTask: Task<Void, Never>?
-    private var wsPumpTask: Task<Void, Never>?
+    private var relayPumpTask: Task<Void, Never>?
 
     init(
         connection: NWConnection,
@@ -55,10 +56,11 @@ final class ProxyConnectionSession: @unchecked Sendable {
     func stop() {
         bridgeTask?.cancel()
         bridgeTask = nil
-        wsPumpTask?.cancel()
-        wsPumpTask = nil
-        Task { [webSocket] in
+        relayPumpTask?.cancel()
+        relayPumpTask = nil
+        Task { [webSocket, tcpRelay] in
             await webSocket?.close()
+            await tcpRelay?.close()
         }
         connection.cancel()
         finish()
@@ -92,6 +94,10 @@ final class ProxyConnectionSession: @unchecked Sendable {
                     }
                     return
                 }
+                if self.bridgeContext != nil, self.tcpRelay != nil {
+                    self.finish()
+                    return
+                }
                 self.finish()
                 return
             }
@@ -122,43 +128,60 @@ final class ProxyConnectionSession: @unchecked Sendable {
                 handshake: handshake,
                 secretHex: settings.secret
             )
-            startWebSocketBridge(handshake)
+            startRelayBridge(handshake)
         } catch {
             logger.append(.error, "Bridge context failed: \(error.localizedDescription)")
             finish()
         }
     }
 
-    private func startWebSocketBridge(_ handshake: MTProtoHandshake) {
+    private func startRelayBridge(_ handshake: MTProtoHandshake) {
         guard bridgeTask == nil else { return }
         bridgeTask = Task { [weak self] in
             guard let self else { return }
             do {
-                let ws = try await connector.connect(
+                let relay = try await connector.connect(
                     for: handshake,
                     settings: settings,
                     logger: logger
                 )
-                self.webSocket = ws
-                self.logger.append(.info, "WebSocket bridge ready for DC\(handshake.dcID)")
                 guard let bridgeContext else {
                     throw MTProtoCryptoError.cryptorCreationFailed
                 }
-                try await ws.send(bridgeContext.relayInit)
-                self.startWebSocketReceivePump(ws)
-                try await self.flushPendingClientBytes(to: ws)
+                switch relay {
+                case .webSocket(let ws):
+                    self.webSocket = ws
+                    self.logger.append(.info, "WebSocket bridge ready for DC\(handshake.dcID)")
+                    try await ws.send(bridgeContext.relayInit)
+                    self.startWebSocketReceivePump(ws)
+                    try await self.flushPendingClientBytes(to: ws)
+                case .tcp(let tcp):
+                    self.tcpRelay = tcp
+                    self.logger.append(.info, "TCP fallback bridge ready for DC\(handshake.dcID)")
+                    try await tcp.send(bridgeContext.relayInit)
+                    self.startTCPReceivePump(tcp)
+                    try await self.flushPendingClientBytes(to: tcp)
+                }
             } catch {
-                self.logger.append(.error, "WebSocket bridge failed: \(error.localizedDescription)")
+                self.logger.append(.error, "Relay bridge failed: \(error.localizedDescription)")
                 self.finish()
             }
         }
     }
 
     private func startWebSocketReceivePump(_ ws: RawWebSocket) {
-        guard wsPumpTask == nil else { return }
-        wsPumpTask = Task { [weak self] in
+        guard relayPumpTask == nil else { return }
+        relayPumpTask = Task { [weak self] in
             guard let self else { return }
             await self.pumpWebSocketToClient(ws)
+        }
+    }
+
+    private func startTCPReceivePump(_ tcp: RawTCPRelay) {
+        guard relayPumpTask == nil else { return }
+        relayPumpTask = Task { [weak self] in
+            guard let self else { return }
+            await self.pumpTCPRelayToClient(tcp)
         }
     }
 
@@ -179,6 +202,23 @@ final class ProxyConnectionSession: @unchecked Sendable {
         finish()
     }
 
+    private func pumpTCPRelayToClient(_ tcp: RawTCPRelay) async {
+        while isActive {
+            do {
+                guard let data = try await tcp.recv() else { break }
+                guard let bridgeContext else { continue }
+                let plain = try bridgeContext.decodeRelayChunk(data)
+                try await writeToClient(plain)
+                logger.append(.debug, "Forwarded \(plain.count) bytes to client via TCP")
+            } catch {
+                logger.append(.error, "TCP receive failed: \(error.localizedDescription)")
+                finish()
+                return
+            }
+        }
+        finish()
+    }
+
     private func flushPendingClientBytes(to ws: RawWebSocket) async throws {
         while let chunk = takePendingClientChunk() {
             guard let bridgeContext else { break }
@@ -192,6 +232,18 @@ final class ProxyConnectionSession: @unchecked Sendable {
                 try await ws.sendBatch(packets)
             }
             logger.append(.debug, "Forwarded \(chunk.count) bytes to WS")
+        }
+    }
+
+    private func flushPendingClientBytes(to tcp: RawTCPRelay) async throws {
+        while let chunk = takePendingClientChunk() {
+            guard let bridgeContext else { break }
+            let encrypted = try bridgeContext.encodeClientStreamChunk(chunk)
+            if encrypted.isEmpty {
+                continue
+            }
+            try await tcp.send(encrypted)
+            logger.append(.debug, "Forwarded \(chunk.count) bytes to TCP relay")
         }
     }
 
@@ -252,11 +304,13 @@ final class ProxyConnectionSession: @unchecked Sendable {
         isActive = false
         bridgeTask?.cancel()
         bridgeTask = nil
-        wsPumpTask?.cancel()
-        wsPumpTask = nil
-        Task { [webSocket] in
+        relayPumpTask?.cancel()
+        relayPumpTask = nil
+        Task { [webSocket, tcpRelay] in
             await webSocket?.close()
+            await tcpRelay?.close()
         }
+        connection.cancel()
         onClose(id)
     }
 

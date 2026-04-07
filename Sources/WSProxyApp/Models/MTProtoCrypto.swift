@@ -158,6 +158,13 @@ struct MTProtoBridgeContext {
         }
     }
 
+    func encodeClientStreamChunk(_ data: Data) throws -> Data {
+        try lock.withLock {
+            let plain = try clientDecryptor.transform(data)
+            return try relayEncryptor.transform(plain)
+        }
+    }
+
     func flushClientTail() throws -> [Data] {
         lock.withLock {
             packetSplitter.flush()
